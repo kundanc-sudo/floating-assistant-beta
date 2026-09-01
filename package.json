@@ -1,0 +1,37 @@
+{
+  "name": "windows-overlay-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "os": [
+    "win32"
+  ],
+  "description": "A Windows-only floating desktop assistant overlay.",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "dotenv": "^17.4.2",
+    "electron": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest",
+    "vite-plugin-electron": "latest",
+    "vite-plugin-electron-renderer": "latest",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/ws": "^8.18.1",
+    "typescript": "latest"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
