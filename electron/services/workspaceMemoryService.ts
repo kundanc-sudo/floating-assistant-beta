@@ -34,8 +34,6 @@ const MAX_RECENT_CHARACTERS = 48000
 const MAX_CONTEXT_CHARACTERS = 30000
 const MAX_MESSAGE_CHARACTERS = 16000
 const MAX_CHANGE_HISTORY = 8
-const SUMMARY_MODEL = 'gpt-4o-mini'
-
 export class WorkspaceMemoryService {
   private messages: WorkspaceMessage[] = []
   private summary = ''
@@ -43,8 +41,8 @@ export class WorkspaceMemoryService {
   private summaryInFlight = false
 
   constructor(
-    private readonly apiKey: string,
     private readonly log: (message: string) => void = () => undefined,
+    private readonly remoteSummarize?: (previous: string, messages: WorkspaceMessage[]) => Promise<string>,
   ) {}
 
   addMessage(message: WorkspaceMessage): void {
@@ -162,20 +160,7 @@ export class WorkspaceMemoryService {
   }
 
   private async summarize(previous: string, messages: WorkspaceMessage[]) {
-    if (!this.apiKey) throw new Error('Missing API key')
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: SUMMARY_MODEL,
-        store: false,
-        input: `Compact this coding workspace history. Preserve the active problem, requirements, language, approaches, solution changes, user preferences, unresolved errors, and referents needed for follow-ups. Do not include filler.\n\nPREVIOUS SUMMARY:\n${previous || '(none)'}\n\nMESSAGES:\n${messages.map((message) => `${message.type.toUpperCase()}: ${message.text}`).join('\n\n')}`,
-      }),
-    })
-    if (!response.ok) throw new Error(`Workspace summary failed: ${response.status}`)
-    const body = (await response.json()) as { output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }
-    const summary = body.output?.flatMap((item) => item.content ?? []).filter((item) => item.type === 'output_text').map((item) => item.text ?? '').join('').trim()
-    if (!summary) throw new Error('Workspace summary was empty')
-    return summary
+    if (!this.remoteSummarize) throw new Error('Backend summary service is unavailable')
+    return this.remoteSummarize(previous, messages)
   }
 }

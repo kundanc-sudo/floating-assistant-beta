@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: floating-assistant-api-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    healthCheckPath: /health/ready
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: floating-assistant-test-db
+          property: connectionString
+      - key: DATABASE_SSL_MODE
+        value: require
+      - key: DATABASE_POOL_MAX
+        value: 5
+      - key: DATABASE_CONNECTION_TIMEOUT_MS
+        value: 10000
+      - key: DATABASE_IDLE_TIMEOUT_MS
+        value: 30000
+      - key: AI_PROVIDER_KEY
+        sync: false
+      - key: TRUST_PROXY
+        value: true
+      - key: EMAIL_PROVIDER
+        value: resend
+      - key: EMAIL_PROVIDER_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: BETA_MODE
+        value: true
+      - key: AUTH_SESSION_TTL_HOURS
+        value: 168
+      - key: AUTH_MAX_SESSIONS_PER_USER
+        value: 10
+      - key: PASSWORD_RESET_TTL_MINUTES
+        value: 30
+      - key: EMAIL_VERIFICATION_TTL_HOURS
+        value: 24
+      - key: BETA_DAILY_AI_REQUESTS
+        value: 25
+      - key: BETA_DAILY_TOKENS
+        value: 50000
+      - key: BETA_CONCURRENT_AI_REQUESTS
+        value: 1
+      - key: AI_TIMEOUT_MS
+        value: 120000
+      - key: SHARE_SESSION_TTL_MINUTES
+        value: 60
+
+databases:
+  - name: floating-assistant-test-db
+    plan: free
+    databaseName: floating_assistant
+    user: floating_assistant

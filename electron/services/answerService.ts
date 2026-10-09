@@ -4,13 +4,17 @@ import type {
 } from './realtimeAssistantService'
 
 export type AnswerRoute = 'CONVERSATION' | 'TECHNICAL' | 'CODING'
+export interface ImageInput {
+  label: string
+  imageDataUrl: string
+}
 
 export interface AnswerRequest {
   request: AcceptedRequest
   route: AnswerRoute
   userText: string
   instructions: string
-  imageDataUrl?: string
+  imageInputs?: ImageInput[]
 }
 
 interface AnswerServiceEvents {
@@ -36,6 +40,8 @@ interface ResponseStreamEvent {
   }
   error?: { message?: string }
 }
+
+class RetryableAnswerError extends Error {}
 
 export class AnswerService {
   private controller: AbortController | null = null
@@ -64,9 +70,41 @@ export class AnswerService {
 
   private async stream(input: AnswerRequest, controller: AbortController) {
     const startedAt = performance.now()
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const completeText = await this.streamAttempt(input, controller, startedAt)
+        if (this.activeRequestId !== input.request.id) return
+        this.log(`[PERF] response completed route=${input.route} total=${Math.round(performance.now() - startedAt)}ms`)
+        this.activeRequestId = null
+        this.controller = null
+        this.events.onComplete(input.request, completeText)
+        return
+      } catch (error) {
+        if (controller.signal.aborted || this.activeRequestId !== input.request.id) return
+        if (attempt === 0 && error instanceof RetryableAnswerError) {
+          this.log(`[ANSWER] transient failure; retrying once requestId=${input.request.id}`)
+          continue
+        }
+        this.activeRequestId = null
+        this.controller = null
+        this.events.onError(
+          input.request,
+          error instanceof Error ? error.message : 'The answer could not be generated.',
+        )
+        return
+      }
+    }
+  }
+
+  private async streamAttempt(
+    input: AnswerRequest,
+    controller: AbortController,
+    startedAt: number,
+  ): Promise<string> {
     let firstDeltaAt: number | null = null
     let completeText = ''
     try {
+      const dispatchedAt = performance.now()
       const coding = input.route === 'CODING'
       const response = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
@@ -89,20 +127,21 @@ export class AnswerService {
           text: { verbosity: coding ? 'medium' : 'low' },
           input: [{
             role: 'user',
-            content: [
-              { type: 'input_text', text: input.userText },
-              ...(input.imageDataUrl
-                ? [{ type: 'input_image', image_url: input.imageDataUrl, detail: 'high' }]
-                : []),
-            ],
+            content: buildResponseContent(input.userText, input.imageInputs ?? []),
           }],
         }),
       })
+      this.trace(input.request.traceTurnId, 'RESPONSE_HEADERS')
+      this.log(`[PERF] response-headers route=${input.route} dispatch-to-headers=${Math.round(performance.now() - dispatchedAt)}ms`)
       if (!response.ok) {
         const detail = await response.text()
-        throw new Error(this.formatHttpError(response.status, detail))
+        const message = this.formatHttpError(response.status, detail)
+        if (response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500) {
+          throw new RetryableAnswerError(message)
+        }
+        throw new Error(message)
       }
-      if (!response.body) throw new Error('The answer stream was empty.')
+      if (!response.body) throw new RetryableAnswerError('The answer stream was empty.')
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -126,10 +165,11 @@ export class AnswerService {
             continue
           }
           if (event.type === 'response.output_text.delta' && event.delta) {
-            if (this.activeRequestId !== input.request.id) return
+            if (this.activeRequestId !== input.request.id) return completeText
             completeText += event.delta
             if (firstDeltaAt === null) {
               firstDeltaAt = performance.now()
+              this.trace(input.request.traceTurnId, 'FIRST_TOKEN')
               this.log(`[PERF] first response delta route=${input.route} request-to-first-token=${Math.round(firstDeltaAt - startedAt)}ms`)
             }
             this.events.onDelta({
@@ -156,20 +196,18 @@ export class AnswerService {
         }
         if (done) break
       }
-      if (this.activeRequestId !== input.request.id) return
-      if (!completeText.trim()) throw new Error('OpenAI returned an empty answer.')
-      this.log(`[PERF] response completed route=${input.route} total=${Math.round(performance.now() - startedAt)}ms`)
-      this.activeRequestId = null
-      this.controller = null
-      this.events.onComplete(input.request, completeText)
+      if (this.activeRequestId !== input.request.id) return completeText
+      if (!completeText.trim()) throw new RetryableAnswerError('OpenAI returned an empty answer.')
+      return completeText
     } catch (error) {
-      if (controller.signal.aborted || this.activeRequestId !== input.request.id) return
-      this.activeRequestId = null
-      this.controller = null
-      this.events.onError(
-        input.request,
-        error instanceof Error ? error.message : 'The answer could not be generated.',
-      )
+      if (
+        error instanceof TypeError &&
+        !completeText &&
+        !controller.signal.aborted
+      ) {
+        throw new RetryableAnswerError('The OpenAI connection was interrupted before the answer started.')
+      }
+      throw error
     }
   }
 
@@ -187,4 +225,20 @@ export class AnswerService {
   private log(message: string) {
     if (this.options.development) console.info(message)
   }
+
+  private trace(turnId: string | undefined, event: string) {
+    if (this.options.development && turnId) {
+      console.info(`[TURN_TRACE] turnId=${turnId} event=${event} timestamp=${Date.now()}`)
+    }
+  }
+}
+
+export function buildResponseContent(userText: string, imageInputs: ImageInput[]) {
+  return [
+    { type: 'input_text', text: userText },
+    ...imageInputs.flatMap((image) => [
+      { type: 'input_text', text: image.label },
+      { type: 'input_image', image_url: image.imageDataUrl, detail: 'high' },
+    ]),
+  ]
 }

@@ -29,14 +29,34 @@ if not exist "node_modules\" (
   )
 )
 
+if not exist "server\node_modules\" (
+  echo Installing backend dependencies...
+  call npm.cmd install --prefix server
+  if errorlevel 1 (
+    echo Backend dependency installation failed.
+    pause
+    exit /b 1
+  )
+)
+
 if not exist ".env" (
   echo The .env file is missing.
-  echo Copy .env.example to .env and add OPENAI_API_KEY before running.
+  echo Copy .env.example to .env and configure DATABASE_URL and AI_PROVIDER_KEY.
   pause
   exit /b 1
 )
 
+if not exist "server\.env" (
+  echo The server\.env file is missing.
+  echo Copy server\.env.example to server\.env and configure DATABASE_URL and AI_PROVIDER_KEY.
+  pause
+  exit /b 1
+)
+
+echo Starting backend API...
+start "Floating Assistant API" /min cmd /c "cd /d ""%~dp0"" && npm.cmd run share-server"
 echo Starting Windows Overlay Assistant...
+set "ELECTRON_RUN_AS_NODE="
 call npm.cmd run dev
 
 if errorlevel 1 (

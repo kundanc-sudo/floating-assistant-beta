@@ -34,6 +34,7 @@ export interface AcceptedRequest {
   source: AudioSource
   timestamp: number
   requestType?: 'conversation' | 'image' | 'text'
+  traceTurnId?: string
 }
 
 interface RealtimeEvent {
@@ -53,20 +54,35 @@ interface ServiceEvents {
   onStaleAnswer: (requestId: string) => void
   onError: (message: string) => void
   onTranscriptFragment: (source: AudioSource, transcript: string) => void
+  onSpeechStopped: (source: AudioSource, timestamp: number) => void
+}
+
+interface RealtimeAssistantOptions {
+  url?: string
+  development?: boolean
 }
 
 const REALTIME_URL =
   'wss://api.openai.com/v1/realtime?model=gpt-realtime'
 const RECONNECT_DELAYS = [1000, 2000, 4000]
+const FATAL_REALTIME_ERROR_CODES = new Set([
+  'invalid_api_key',
+  'insufficient_quota',
+  'billing_not_active',
+  'model_not_found',
+  'permission_denied',
+  'project_not_found',
+])
 
 export class RealtimeAssistantService {
   private socket: WebSocket | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
   private reconnectAttempt = 0
+  private connectionGeneration = 0
   private running = false
   private speaking = false
   private responding = false
-  private apiKey = ''
+  private credentialProvider: (() => Promise<string>) | null = null
   private interimTranscript = ''
   private pendingResponseText = ''
   private hasEmittedResponseText = false
@@ -78,20 +94,24 @@ export class RealtimeAssistantService {
   constructor(
     private readonly source: AudioSource,
     private readonly events: ServiceEvents,
+    private readonly options: RealtimeAssistantOptions = {},
   ) {}
 
-  async start(apiKey: string): Promise<void> {
+  async start(credential: string | (() => Promise<string>)): Promise<void> {
     if (this.running) return
-    if (!apiKey) throw new Error('OPENAI_API_KEY is missing from D:\\project\\.env.')
+    if (!credential) throw new Error('Realtime authentication is unavailable.')
 
-    this.apiKey = apiKey
+    this.credentialProvider = typeof credential === 'string' ? async () => credential : credential
     this.running = true
     this.reconnectAttempt = 0
+    const generation = ++this.connectionGeneration
     this.events.onStatus('CONNECTING')
+    this.log('[Realtime] connecting')
 
     try {
-      await this.connect()
+      await this.connect(generation)
     } catch (error) {
+      if (!this.running || generation !== this.connectionGeneration) return
       this.running = false
       this.events.onStatus('ERROR')
       throw error
@@ -99,7 +119,9 @@ export class RealtimeAssistantService {
   }
 
   stop(): void {
+    const wasActive = this.running || this.socket !== null || this.reconnectTimer !== null
     this.running = false
+    this.connectionGeneration += 1
     this.speaking = false
     this.responding = false
     this.interimTranscript = ''
@@ -112,12 +134,11 @@ export class RealtimeAssistantService {
       this.reconnectTimer = null
     }
 
-    if (this.socket) {
-      this.socket.removeAllListeners()
-      this.socket.close()
-      this.socket = null
-    }
+    const socket = this.socket
+    this.socket = null
+    if (socket) this.closeSocket(socket)
 
+    if (wasActive) this.log('[Realtime] intentional stop')
     this.events.onStatus('IDLE')
   }
 
@@ -189,42 +210,78 @@ export class RealtimeAssistantService {
     this.activeResponseId = null
   }
 
-  private connect(): Promise<void> {
+  private async connect(generation: number): Promise<void> {
+    const apiKey = await this.credentialProvider?.()
+    if (!apiKey) throw new Error('Realtime authentication is unavailable.')
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(REALTIME_URL, {
+      const socket = new WebSocket(this.options.url ?? REALTIME_URL, {
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
       })
       this.socket = socket
       let settled = false
 
       socket.once('open', () => {
+        if (!this.running || generation !== this.connectionGeneration) {
+          settled = true
+          this.closeSocket(socket)
+          resolve()
+          return
+        }
         settled = true
         this.reconnectAttempt = 0
         this.configureSession()
         resolve()
       })
 
-      socket.on('message', (data) => this.handleMessage(data.toString()))
+      socket.on('message', (data) => {
+        if (this.running && generation === this.connectionGeneration) {
+          this.handleMessage(data.toString())
+        }
+      })
 
       socket.once('unexpected-response', (_request, response) => {
+        if (!this.running || generation !== this.connectionGeneration) {
+          if (!settled) resolve()
+          return
+        }
         const message =
           response.statusCode === 401
-            ? 'OpenAI authentication failed. Check OPENAI_API_KEY in .env.'
+            ? 'Realtime authentication failed. Request a new backend session credential.'
             : `Realtime connection failed with HTTP ${response.statusCode}.`
         if (!settled) reject(new Error(message))
         this.fail(message)
       })
 
       socket.once('error', (error) => {
-        if (!settled) reject(new Error(`Realtime connection failed: ${error.message}`))
+        if (!settled) {
+          if (!this.running || generation !== this.connectionGeneration) resolve()
+          else reject(new Error(`Realtime connection failed: ${error.message}`))
+        }
       })
 
-      socket.once('close', () => {
+      socket.once('close', (code, reasonBuffer) => {
         if (this.socket === socket) this.socket = null
-        if (!settled) reject(new Error('Realtime connection closed before it was ready.'))
-        if (this.running) this.scheduleReconnect()
+        const isCurrent = generation === this.connectionGeneration
+        const reason = reasonBuffer.toString()
+        if (this.options.development) {
+          this.log(`[Realtime] socket closed code=${code} reason=${reason || '(none)'}`)
+        }
+        if (!settled) {
+          if (!this.running || !isCurrent) resolve()
+          else reject(new Error('Realtime connection closed before it was ready.'))
+        }
+        if (
+          this.running &&
+          isCurrent &&
+          (reason.includes('invalid_api_key') || reason.includes('authentication'))
+        ) {
+          this.fail('Realtime authentication failed. Request a new backend session credential.')
+          return
+        }
+        if (this.running && isCurrent) this.scheduleReconnect()
+        else if (!this.running) this.log('[Realtime] reconnect suppressed because stopped')
       })
     })
   }
@@ -248,7 +305,7 @@ export class RealtimeAssistantService {
               type: 'server_vad',
               threshold: 0.5,
               prefix_padding_ms: 300,
-              silence_duration_ms: 700,
+              silence_duration_ms: 500,
               create_response: false,
               // A response is superseded only after a new turn passes validation.
               interrupt_response: false,
@@ -278,6 +335,7 @@ export class RealtimeAssistantService {
         break
       case 'input_audio_buffer.speech_stopped':
         this.speaking = false
+        this.events.onSpeechStopped(this.source, Date.now())
         this.events.onStatus('PROCESSING')
         break
       case 'conversation.item.input_audio_transcription.delta':
@@ -364,9 +422,16 @@ export class RealtimeAssistantService {
         if (!this.speaking) this.events.onStatus('LISTENING')
         break
       case 'error':
-        this.events.onError(
-          event.error?.message ?? 'The Realtime API reported an unknown error.',
-        )
+        if (event.error?.code && FATAL_REALTIME_ERROR_CODES.has(event.error.code)) {
+          const message = event.error.code === 'invalid_api_key'
+            ? 'Realtime authentication failed. Request a new backend session credential.'
+            : `OpenAI Realtime cannot start (${event.error.code}). Check API billing, model access, and project permissions.`
+          this.fail(message)
+        } else {
+          this.events.onError(
+            event.error?.message ?? 'The Realtime API reported an unknown error.',
+          )
+        }
         break
     }
   }
@@ -389,8 +454,9 @@ export class RealtimeAssistantService {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (!this.running) return
-      void this.connect().catch(() => {
-        if (this.running) this.scheduleReconnect()
+      const generation = this.connectionGeneration
+      void this.connect(generation).catch(() => {
+        if (this.running && generation === this.connectionGeneration) this.scheduleReconnect()
       })
     }, delay)
   }
@@ -403,11 +469,29 @@ export class RealtimeAssistantService {
 
   private stopConnectionOnly(): void {
     this.running = false
+    this.connectionGeneration += 1
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
-    this.socket?.removeAllListeners()
-    this.socket?.close()
+    const socket = this.socket
     this.socket = null
+    if (socket) this.closeSocket(socket)
+  }
+
+  private closeSocket(socket: WebSocket): void {
+    const state = socket.readyState
+    this.log(`[Realtime] socket state=${state}`)
+    if (state !== WebSocket.CONNECTING && state !== WebSocket.OPEN) return
+    try {
+      // Keep the existing error/close listeners until shutdown completes. In
+      // particular, ws emits an error when a CONNECTING socket is cancelled.
+      socket.close()
+    } catch (error) {
+      if (this.options.development) console.error('[Realtime] socket close failed', error)
+    }
+  }
+
+  private log(message: string): void {
+    if (this.options.development) console.info(message)
   }
 
   private send(event: Record<string, unknown>): void {

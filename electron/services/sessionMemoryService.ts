@@ -25,8 +25,8 @@ const MAX_RECENT_SEGMENTS = 24
 const MAX_RECENT_CHARACTERS = 8000
 const RECENT_SEGMENTS_TO_KEEP = 12
 const MAX_RECENT_INTERACTIONS = 3
-const SUMMARY_MODEL = 'gpt-4o-mini'
-
+const MAX_RETAINED_SEGMENTS_AFTER_SUMMARY_FAILURE = 48
+const MAX_RETAINED_CHARACTERS_AFTER_SUMMARY_FAILURE = 16_000
 export class SessionMemoryService {
   private summary = ''
   private recentSegments: ConversationSegment[] = []
@@ -35,8 +35,8 @@ export class SessionMemoryService {
   private generation = 0
 
   constructor(
-    private readonly apiKey: string,
     private readonly log: (message: string) => void = () => undefined,
+    private readonly remoteSummarize?: (previousSummary: string, segments: ConversationSegment[]) => Promise<string>,
   ) {}
 
   reset(): void {
@@ -50,6 +50,13 @@ export class SessionMemoryService {
 
   getGeneration(): number {
     return this.generation
+  }
+
+  getRecentInteractions(): RecentInteraction[] {
+    return this.recentInteractions.map((interaction) => ({
+      ...interaction,
+      conversation: interaction.conversation.map((segment) => ({ ...segment })),
+    }))
   }
 
   createAnswerContext(currentConversation: ConversationSegment[]): AnswerContext {
@@ -68,7 +75,12 @@ export class SessionMemoryService {
   }
 
   commitConversation(conversation: ConversationSegment[]): void {
-    this.recentSegments.push(...conversation.map((segment) => ({ ...segment })))
+    const existingIds = new Set(this.recentSegments.map((segment) => segment.id))
+    this.recentSegments.push(
+      ...conversation
+        .filter((segment) => !existingIds.has(segment.id))
+        .map((segment) => ({ ...segment })),
+    )
     this.scheduleSummaryIfNeeded()
   }
 
@@ -77,17 +89,22 @@ export class SessionMemoryService {
     conversation: ConversationSegment[],
     assistantAnswer: string,
     expectedGeneration: number,
-  ): void {
-    if (expectedGeneration !== this.generation) return
+  ): RecentInteraction | null {
+    if (expectedGeneration !== this.generation) return null
     const answer = assistantAnswer.trim()
-    if (!answer) return
-    this.recentInteractions.push({
+    if (!answer) return null
+    const interaction: RecentInteraction = {
       requestId,
       conversation: conversation.map((segment) => ({ ...segment })),
       assistantAnswer: answer,
       timestamp: Date.now(),
-    })
+    }
+    this.recentInteractions.push(interaction)
     this.recentInteractions = this.recentInteractions.slice(-MAX_RECENT_INTERACTIONS)
+    return {
+      ...interaction,
+      conversation: interaction.conversation.map((segment) => ({ ...segment })),
+    }
   }
 
   private scheduleSummaryIfNeeded(): void {
@@ -112,9 +129,11 @@ export class SessionMemoryService {
     const previousSummary = this.summary
     this.summaryInFlight = true
 
+    let summarySucceeded = false
     void this.summarize(previousSummary, snapshot)
       .then((nextSummary) => {
         if (generation !== this.generation) return
+        summarySucceeded = true
         this.summary = nextSummary
         const summarizedIds = new Set(snapshot.map((segment) => segment.id))
         this.recentSegments = this.recentSegments.filter(
@@ -123,46 +142,36 @@ export class SessionMemoryService {
         this.log(`[MEMORY] summarized segments=${snapshot.length}`)
       })
       .catch(() => {
+        if (generation === this.generation) this.boundRecentSegmentsAfterFailure()
         this.log('[MEMORY] summary update failed; previous memory retained')
       })
       .finally(() => {
         if (generation !== this.generation) return
         this.summaryInFlight = false
-        this.scheduleSummaryIfNeeded()
+        if (summarySucceeded) this.scheduleSummaryIfNeeded()
       })
+  }
+
+  private boundRecentSegmentsAfterFailure(): void {
+    const retained: ConversationSegment[] = []
+    let characters = 0
+    for (let index = this.recentSegments.length - 1; index >= 0; index -= 1) {
+      const segment = this.recentSegments[index]
+      if (
+        retained.length >= MAX_RETAINED_SEGMENTS_AFTER_SUMMARY_FAILURE ||
+        (retained.length > 0 && characters + segment.text.length > MAX_RETAINED_CHARACTERS_AFTER_SUMMARY_FAILURE)
+      ) break
+      retained.unshift(segment)
+      characters += segment.text.length
+    }
+    this.recentSegments = retained
   }
 
   private async summarize(
     previousSummary: string,
     segments: ConversationSegment[],
   ): Promise<string> {
-    if (!this.apiKey) throw new Error('Missing API key')
-    const transcript = segments
-      .map((segment) => `${segment.source.toUpperCase()}: ${segment.text}`)
-      .join('\n')
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: SUMMARY_MODEL,
-        store: false,
-        input: `Create a compact factual rolling meeting summary in English. Preserve current topics, named technologies, decisions, constraints, unresolved questions, and referents needed for follow-ups. Remove greetings, filler, repetition, and noise. Prefer newer information when topics change.\n\nPREVIOUS SUMMARY:\n${previousSummary || '(none)'}\n\nSEGMENTS TO COMPRESS:\n${transcript}`,
-      }),
-    })
-    if (!response.ok) throw new Error(`Summary request failed: ${response.status}`)
-    const body = (await response.json()) as {
-      output?: Array<{ content?: Array<{ type?: string; text?: string }> }>
-    }
-    const summary = body.output
-      ?.flatMap((item) => item.content ?? [])
-      .filter((content) => content.type === 'output_text')
-      .map((content) => content.text ?? '')
-      .join('')
-      .trim()
-    if (!summary) throw new Error('Summary response was empty')
-    return summary
+    if (!this.remoteSummarize) throw new Error('Backend summary service is unavailable')
+    return this.remoteSummarize(previousSummary, segments)
   }
 }

@@ -9,14 +9,25 @@
   "description": "A Windows-only floating desktop assistant overlay.",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "dev": "set \"ELECTRON_RUN_AS_NODE=\" && vite",
+    "build": "tsc --noEmit && vite build && node scripts/verifyRendererSecrets.mjs",
+    "test": "tsx --test electron/services/answerService.test.ts electron/services/attachmentService.test.ts electron/services/conversationTurnDetector.test.ts electron/services/interviewContextService.test.ts electron/services/productShellService.test.ts electron/services/realtimeAssistantService.test.ts electron/services/sessionMemoryService.test.ts electron/services/transcriptEligibility.test.ts electron/services/utteranceBuffer.test.ts src/services/answerDisplayState.test.ts",
+    "test:built-pdf": "tsx electron/services/builtPdfSmoke.test.ts",
+    "preview": "vite preview",
+    "share-server": "npm.cmd --prefix server run dev",
+    "build:share-server": "npm.cmd --prefix server run build",
+    "start:share-server": "npm.cmd --prefix server run start",
+    "server:test": "npm.cmd --prefix server test",
+    "server:build": "npm.cmd --prefix server run build",
+    "db:migrate": "npm.cmd --prefix server run db:migrate",
+    "security:scan": "node scripts/verifyRendererSecrets.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "dotenv": "^17.4.2",
-    "electron": "latest",
+    "electron": "^44.5.1",
+    "mammoth": "^1.12.2",
+    "pdf2json": "^4.0.3",
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest",
@@ -29,9 +40,13 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "@types/ws": "^8.18.1",
+    "tsx": "^4.23.13",
     "typescript": "latest"
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "undici": "7.29.1"
   }
 }
