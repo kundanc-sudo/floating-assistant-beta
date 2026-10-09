@@ -26,7 +26,7 @@ Never paste a secret into chat, source control, `render.yaml`, a screenshot, or 
 - `/health/ready` as the Render health check;
 - automatic deploys disabled;
 - the database's private connection string injected as `DATABASE_URL`;
-- an explicit required TLS mode and a five-connection application pool;
+- an explicit Render private-network database mode and a five-connection application pool;
 - production, proxy, beta, authentication, and conservative test usage settings;
 - prompts for the new AI key and Resend key/sender instead of storing them in Git.
 
@@ -74,7 +74,7 @@ Set by the Blueprint:
 |---|---|
 | `NODE_ENV` | `production` |
 | `DATABASE_URL` | Render database `connectionString` reference |
-| `DATABASE_SSL_MODE` | `require` |
+| `DATABASE_SSL_MODE` | `render-internal` |
 | `DATABASE_POOL_MAX` | `5` |
 | `DATABASE_CONNECTION_TIMEOUT_MS` | `10000` |
 | `DATABASE_IDLE_TIMEOUT_MS` | `30000` |
@@ -121,7 +121,7 @@ $renderDbSecret = Read-Host 'Paste Render External Database URL' -AsSecureString
 $renderDbPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($renderDbSecret)
 try {
   $env:DATABASE_URL = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($renderDbPointer)
-  $env:DATABASE_SSL_MODE = 'require'
+  $env:DATABASE_SSL_MODE = 'verify-full'
   npm.cmd --prefix server run db:migrate:runtime
   npm.cmd --prefix server run db:verify
 } finally {
@@ -135,7 +135,7 @@ try {
 4. A failure is a stop condition. Do not start beta testing until both commands succeed.
 5. Revoke external database access again if it was temporarily widened.
 
-This runs `server/drizzle/0000_open_wallflower.sql` and subsequent reviewed migrations through Drizzle's migration history. It does not print `DATABASE_URL`.
+This runs `server/drizzle/0000_open_wallflower.sql` and subsequent reviewed migrations through Drizzle's migration history. The external Render endpoint uses TLS with CA and hostname verification. It does not print `DATABASE_URL`.
 
 ## Verify the deployed service
 

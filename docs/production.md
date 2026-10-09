@@ -4,7 +4,7 @@ The Electron desktop application is not containerized. Deploy only the backend b
 
 ## Required production configuration
 
-Start from `server/.env.example` and provide values through the hosting platform's secret manager. Production startup rejects a missing provider key, a database connection without required TLS (`sslmode=require` in the URL or `DATABASE_SSL_MODE=require` for an injected managed URL), non-HTTPS public URL, untrusted proxy configuration, console email provider, incomplete email-provider credentials, or wildcard origin.
+Start from `server/.env.example` and provide values through the hosting platform's secret manager. Production startup rejects a missing provider key, a database connection without TLS (`DATABASE_SSL_MODE=verify-full` is preferred for public endpoints), non-HTTPS public URL, untrusted proxy configuration, console email provider, incomplete email-provider credentials, or wildcard origin. `DATABASE_SSL_MODE=render-internal` is accepted only inside Render for its injected private-network `connectionString`, where Render requires TLS to be omitted; it must not be used with a public database endpoint.
 
 `ALLOWED_ORIGINS` is a comma-separated allow-list for browser-origin API calls. Electron main-process requests normally have no `Origin` header and remain supported. Do not expose provider, database, email, or session credentials to Vite/renderer variables.
 

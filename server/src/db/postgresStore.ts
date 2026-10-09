@@ -2,10 +2,10 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql, sum } fro
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { Pool } from 'pg'
 import * as schema from './schema.js'
-import { databaseConnectionString } from './databaseConnection.js'
+import { databaseConnectionString, type DatabaseSslMode } from './databaseConnection.js'
 import type { ProductStore } from './store.js'
 
-export function createPostgresStore(databaseUrl: string, options: { max?: number; connectionTimeoutMillis?: number; idleTimeoutMillis?: number; sslMode?: 'url' | 'require' } = {}) {
+export function createPostgresStore(databaseUrl: string, options: { max?: number; connectionTimeoutMillis?: number; idleTimeoutMillis?: number; sslMode?: DatabaseSslMode } = {}) {
   const pool = new Pool({
     connectionString: databaseConnectionString(databaseUrl, options.sslMode ?? 'url'),
     max: options.max ?? 10,

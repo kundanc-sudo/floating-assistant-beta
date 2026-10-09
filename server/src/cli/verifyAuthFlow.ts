@@ -5,14 +5,16 @@ import { config } from 'dotenv'
 import { buildApp } from '../app.js'
 import type { AiProvider } from '../ai/provider.js'
 import { createPostgresStore } from '../db/postgresStore.js'
+import { parseDatabaseSslMode } from '../db/databaseConnection.js'
 import { TestEmailService } from '../email/emailService.js'
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 config({ path: path.join(serverDirectory, '.env'), quiet: true })
 const databaseUrl = process.env.DATABASE_URL?.trim()
 if (!databaseUrl) throw new Error('DATABASE_URL is required in server/.env or the process environment.')
+const databaseSslMode = parseDatabaseSslMode(process.env.DATABASE_SSL_MODE)
 
-const database = createPostgresStore(databaseUrl)
+const database = createPostgresStore(databaseUrl, { sslMode: databaseSslMode })
 const email = new TestEmailService()
 const provider: AiProvider = {
   async *stream() { yield { delta: 'unused' } },

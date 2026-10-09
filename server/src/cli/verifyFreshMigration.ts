@@ -5,21 +5,24 @@ import { config } from 'dotenv'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
+import { databaseConnectionString, parseDatabaseSslMode } from '../db/databaseConnection.js'
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 config({ path: path.join(serverDirectory, '.env'), quiet: true })
 const databaseUrl = process.env.DATABASE_URL?.trim()
 if (!databaseUrl) throw new Error('DATABASE_URL is required in server/.env or the process environment.')
+const databaseSslMode = parseDatabaseSslMode(process.env.DATABASE_SSL_MODE)
+const effectiveDatabaseUrl = databaseConnectionString(databaseUrl, databaseSslMode)
 
 const databaseName = `floating_assistant_phase3a_${Date.now()}_${randomBytes(3).toString('hex')}`
 const quotedDatabaseName = `"${databaseName}"`
-const admin = new pg.Client({ connectionString: databaseUrl })
+const admin = new pg.Client({ connectionString: effectiveDatabaseUrl })
 let created = false
 await admin.connect()
 try {
   await admin.query(`create database ${quotedDatabaseName}`)
   created = true
-  const temporaryUrl = new URL(databaseUrl)
+  const temporaryUrl = new URL(effectiveDatabaseUrl)
   temporaryUrl.pathname = `/${databaseName}`
   const pool = new pg.Pool({ connectionString: temporaryUrl.toString(), max: 2 })
   try {

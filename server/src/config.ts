@@ -1,7 +1,9 @@
+import { parseDatabaseSslMode, type DatabaseSslMode } from './db/databaseConnection.js'
+
 export interface ServerConfig {
   port: number
   databaseUrl: string
-  databaseSslMode: 'url' | 'require'
+  databaseSslMode: DatabaseSslMode
   providerKey: string
   fastModel: string
   codingModel: string
@@ -40,8 +42,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (!databaseUrl) throw new Error('DATABASE_URL is required.')
   validateDatabaseUrl(databaseUrl)
   if (production && !providerKey) throw new Error('AI_PROVIDER_KEY is required in production.')
-  if (production && databaseSslMode !== 'require' && !databaseRequiresTls(databaseUrl)) {
-    throw new Error('Production database connections must require TLS using DATABASE_SSL_MODE=require or sslmode=require in DATABASE_URL.')
+  if (production && databaseSslMode === 'render-internal' && !renderHostname) {
+    throw new Error('DATABASE_SSL_MODE=render-internal is only allowed when RENDER_EXTERNAL_HOSTNAME is present.')
+  }
+  if (production && databaseSslMode !== 'render-internal' && databaseSslMode !== 'require' && databaseSslMode !== 'verify-full' && !databaseRequiresTls(databaseUrl)) {
+    throw new Error('Production database connections must require TLS (verify-full preferred) or explicitly use the Render internal private network.')
   }
   if (!['console', 'webhook', 'resend'].includes(emailProvider)) throw new Error('EMAIL_PROVIDER must be console, webhook, or resend.')
   if (production) {
@@ -104,12 +109,6 @@ function positiveInteger(value: string | undefined, fallback: number) {
 function databaseRequiresTls(value: string) {
   const sslMode = new URL(value).searchParams.get('sslmode')?.toLowerCase()
   return sslMode === 'require' || sslMode === 'verify-ca' || sslMode === 'verify-full'
-}
-
-function parseDatabaseSslMode(value: string | undefined): 'url' | 'require' {
-  const normalized = value?.trim().toLowerCase() || 'url'
-  if (normalized === 'url' || normalized === 'require') return normalized
-  throw new Error('DATABASE_SSL_MODE must be url or require.')
 }
 
 function validateDatabaseUrl(value: string) {

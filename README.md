@@ -109,7 +109,7 @@ All product and AI endpoints determine the user from the validated bearer sessio
 - The provider key exists only in backend configuration. Realtime audio uses short-lived provider client secrets minted by the authenticated backend.
 - Completed meaningful Q&A turns are persisted. Partial transcripts, VAD events, detector state, and individual streamed tokens are not.
 - AI and authentication endpoints are rate-limited, daily token/request limits and per-user concurrency are server-enforced, and request bodies have explicit size/shape limits.
-- Production requires a TLS-enabled PostgreSQL connection. Deploy the API behind HTTPS; deployment is intentionally outside this phase.
+- Production requires a verified TLS PostgreSQL connection unless the API uses Render's explicitly configured private-network database endpoint. Deploy the API behind HTTPS; deployment is intentionally outside this phase.
 
 Private-beta production configuration, Docker usage, migration policy, email setup, invites, backup/restore, and operational prerequisites are documented in [docs/production.md](docs/production.md).
 

@@ -15,7 +15,7 @@ services:
           name: floating-assistant-test-db
           property: connectionString
       - key: DATABASE_SSL_MODE
-        value: require
+        value: render-internal
       - key: DATABASE_POOL_MAX
         value: 5
       - key: DATABASE_CONNECTION_TIMEOUT_MS

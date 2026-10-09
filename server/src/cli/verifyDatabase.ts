@@ -2,16 +2,18 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from 'dotenv'
 import pg from 'pg'
+import { databaseConnectionString, parseDatabaseSslMode } from '../db/databaseConnection.js'
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 config({ path: path.join(serverDirectory, '.env'), quiet: true })
 const databaseUrl = process.env.DATABASE_URL?.trim()
 if (!databaseUrl) throw new Error('DATABASE_URL is required in server/.env or the process environment.')
+const databaseSslMode = parseDatabaseSslMode(process.env.DATABASE_SSL_MODE)
 
 const expectedTables = ['auth_sessions', 'auth_tokens', 'beta_invites', 'candidate_profiles', 'interview_sessions', 'interview_turns', 'usage_events', 'users']
 const expectedColumns = ['auth_sessions.device_label', 'auth_sessions.last_used_at', 'users.email_verified_at']
 const expectedIndexes = ['auth_sessions_user_last_used_idx', 'auth_tokens_hash_unique', 'beta_invites_code_hash_unique', 'usage_events_user_created_idx']
-const client = new pg.Client({ connectionString: databaseUrl })
+const client = new pg.Client({ connectionString: databaseConnectionString(databaseUrl, databaseSslMode) })
 await client.connect()
 try {
   const tables = await client.query<{ table_name: string }>("select table_name from information_schema.tables where table_schema='public' and table_name = any($1::text[]) order by table_name", [expectedTables])

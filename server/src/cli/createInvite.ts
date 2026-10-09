@@ -3,11 +3,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from 'dotenv'
 import pg from 'pg'
+import { databaseConnectionString, parseDatabaseSslMode } from '../db/databaseConnection.js'
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 config({ path: path.join(serverDirectory, '.env'), quiet: true })
 const databaseUrl = process.env.DATABASE_URL?.trim()
 if (!databaseUrl) throw new Error('DATABASE_URL is required in server/.env.')
+const databaseSslMode = parseDatabaseSslMode(process.env.DATABASE_SSL_MODE)
 
 const emailArgument = argument('email')?.trim().toLowerCase() || null
 const hoursArgument = argument('hours')
@@ -18,7 +20,7 @@ if (emailArgument && !/^\S+@\S+\.\S+$/.test(emailArgument)) throw new Error('--e
 const code = randomBytes(24).toString('base64url')
 const codeHash = createHash('sha256').update(code).digest('hex')
 const expiresAt = new Date(Date.now() + hours * 60 * 60_000)
-const client = new pg.Client({ connectionString: databaseUrl })
+const client = new pg.Client({ connectionString: databaseConnectionString(databaseUrl, databaseSslMode) })
 await client.connect()
 try {
   await client.query(

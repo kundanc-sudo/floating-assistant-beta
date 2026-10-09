@@ -40,6 +40,25 @@ test('production configuration accepts an injected database URL with explicit re
   assert.equal(config.databaseSslMode, 'require')
 })
 
+test('production accepts the Render internal private database mode on Render', () => {
+  const config = loadConfig({
+    ...secureProduction,
+    DATABASE_URL: 'postgresql://user:password@dpg-private/app',
+    DATABASE_SSL_MODE: 'render-internal',
+    RENDER_EXTERNAL_HOSTNAME: 'floating-assistant-api-test.onrender.com',
+  })
+  assert.equal(config.databaseSslMode, 'render-internal')
+})
+
+test('production rejects Render internal mode outside Render', () => {
+  assert.throws(() => loadConfig({
+    ...secureProduction,
+    DATABASE_URL: 'postgresql://user:password@dpg-private/app',
+    DATABASE_SSL_MODE: 'render-internal',
+    RENDER_EXTERNAL_HOSTNAME: '',
+  }))
+})
+
 test('production uses the Render-provided HTTPS hostname when PUBLIC_BASE_URL is absent', () => {
   const config = loadConfig({
     ...secureProduction,
