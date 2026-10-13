@@ -65,6 +65,7 @@ export interface ProductBootstrap {
   profiles: CandidateProfileSummary[]
   settings: UserSettings
   activeInterviewId?: string
+  sessionState?: 'ready' | 'offline'
 }
 
 interface ProductData {

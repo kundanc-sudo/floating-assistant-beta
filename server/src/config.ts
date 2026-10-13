@@ -13,6 +13,7 @@ export interface ServerConfig {
   passwordResetTtlMinutes: number
   emailVerificationTtlHours: number
   publicBaseUrl: string
+  webAppBaseUrl: string
   trustProxy: boolean
   allowedOrigins: string[]
   emailProvider: 'console' | 'webhook' | 'resend'
@@ -27,6 +28,10 @@ export interface ServerConfig {
   databasePoolMax: number
   databaseConnectionTimeoutMs: number
   databaseIdleTimeoutMs: number
+  documentMaxFileBytes: number
+  documentMaxExtractedChars: number
+  documentMaxPdfPages: number
+  documentProcessingTimeoutMs: number
   production: boolean
 }
 
@@ -38,6 +43,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const renderHostname = env.RENDER_EXTERNAL_HOSTNAME?.trim()
   const publicBaseUrl = env.PUBLIC_BASE_URL?.trim()
     || (renderHostname ? `https://${renderHostname}` : `http://localhost:${positiveInteger(env.PORT, 3001)}`)
+  const webAppBaseUrl = (env.WEB_APP_URL?.trim() || publicBaseUrl).replace(/\/$/, '')
   const emailProvider = (env.EMAIL_PROVIDER?.trim() || 'console') as 'console' | 'webhook' | 'resend'
   if (!databaseUrl) throw new Error('DATABASE_URL is required.')
   validateDatabaseUrl(databaseUrl)
@@ -52,6 +58,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (production) {
     if (!publicBaseUrl.startsWith('https://')) throw new Error('Production PUBLIC_BASE_URL must use HTTPS.')
     if (/^https:\/\/(?:localhost|127\.0\.0\.1)(?::|\/|$)/i.test(publicBaseUrl)) throw new Error('Production PUBLIC_BASE_URL cannot use localhost.')
+    if (!webAppBaseUrl.startsWith('https://')) throw new Error('Production WEB_APP_URL must use HTTPS.')
+    if (/^https:\/\/(?:localhost|127\.0\.0\.1)(?::|\/|$)/i.test(webAppBaseUrl)) throw new Error('Production WEB_APP_URL cannot use localhost.')
     if (emailProvider === 'console') throw new Error('Production EMAIL_PROVIDER must be webhook or resend.')
     if (emailProvider === 'webhook' && !env.EMAIL_PROVIDER_URL?.startsWith('https://')) throw new Error('Production webhook EMAIL_PROVIDER_URL must use HTTPS.')
     if (!env.EMAIL_PROVIDER_KEY?.trim()) throw new Error('EMAIL_PROVIDER_KEY is required in production.')
@@ -72,8 +80,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     passwordResetTtlMinutes: positiveInteger(env.PASSWORD_RESET_TTL_MINUTES, 30),
     emailVerificationTtlHours: positiveInteger(env.EMAIL_VERIFICATION_TTL_HOURS, 24),
     publicBaseUrl,
+    webAppBaseUrl,
     trustProxy: parseBoolean(env.TRUST_PROXY, false),
-    allowedOrigins: (env.ALLOWED_ORIGINS ?? '').split(',').map((value) => value.trim()).filter(Boolean),
+    allowedOrigins: parseAllowedOrigins(env.ALLOWED_ORIGINS, production),
     emailProvider,
     emailProviderUrl: env.EMAIL_PROVIDER_URL?.trim() ?? '',
     emailProviderKey: env.EMAIL_PROVIDER_KEY?.trim() ?? '',
@@ -86,6 +95,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     databasePoolMax: positiveInteger(env.DATABASE_POOL_MAX, 10),
     databaseConnectionTimeoutMs: positiveInteger(env.DATABASE_CONNECTION_TIMEOUT_MS, 5_000),
     databaseIdleTimeoutMs: positiveInteger(env.DATABASE_IDLE_TIMEOUT_MS, 30_000),
+    documentMaxFileBytes: positiveInteger(env.DOCUMENT_MAX_FILE_BYTES, 5 * 1024 * 1024),
+    documentMaxExtractedChars: positiveInteger(env.DOCUMENT_MAX_EXTRACTED_CHARS, 500_000),
+    documentMaxPdfPages: positiveInteger(env.DOCUMENT_MAX_PDF_PAGES, 250),
+    documentProcessingTimeoutMs: positiveInteger(env.DOCUMENT_PROCESSING_TIMEOUT_MS, 15_000),
     production,
   }
 }
@@ -95,6 +108,11 @@ function parseBoolean(value: string | undefined, fallback: boolean) {
   if (/^(?:true|1|yes)$/i.test(value)) return true
   if (/^(?:false|0|no)$/i.test(value)) return false
   throw new Error(`Invalid boolean configuration value: ${value}`)
+}
+
+function parseAllowedOrigins(value: string | undefined, production: boolean) {
+  const configured = (value ?? '').split(',').map((origin) => origin.trim()).filter(Boolean)
+  return production ? configured : [...new Set([...configured, 'http://localhost:5174'])]
 }
 
 function positiveInteger(value: string | undefined, fallback: number) {

@@ -145,6 +145,17 @@ interface ProductResult {
   error?: string
 }
 
+interface DesktopPairingState {
+  status: 'idle' | 'pending' | 'approved' | 'expired' | 'failed' | 'cancelled' | 'connected'
+  pairingCode?: string
+  expiresAt?: string
+  error?: string
+  connection?: {
+    interview: { id: string; name: string; company?: string; role?: string }
+    bootstrap: ProductBootstrap
+  }
+}
+
 interface PendingScreenshot {
   id: string
   imageDataUrl: string
@@ -266,6 +277,7 @@ contextBridge.exposeInMainWorld('overlayAPI', {
 
 contextBridge.exposeInMainWorld('productAPI', {
   getBootstrap: (): Promise<ProductBootstrap> => ipcRenderer.invoke('product:get-bootstrap'),
+  retrySession: (): Promise<ProductBootstrap> => ipcRenderer.invoke('product:retry-session'),
   login: (email: string, password: string, displayName?: string, inviteCode?: string): Promise<ProductResult> =>
     ipcRenderer.invoke('product:login', { email, password, displayName, inviteCode }),
   logout: (): Promise<ProductBootstrap> => ipcRenderer.invoke('product:logout'),
@@ -306,6 +318,16 @@ contextBridge.exposeInMainWorld('productAPI', {
     ipcRenderer.invoke('product:update-account', displayName),
   clearLocalData: (): Promise<ProductBootstrap> =>
     ipcRenderer.invoke('product:clear-local-data'),
+  startDesktopPairing: (): Promise<DesktopPairingState> =>
+    ipcRenderer.invoke('product:start-desktop-pairing'),
+  getDesktopPairing: (): Promise<DesktopPairingState> =>
+    ipcRenderer.invoke('product:get-desktop-pairing'),
+  cancelDesktopPairing: (): Promise<DesktopPairingState> =>
+    ipcRenderer.invoke('product:cancel-desktop-pairing'),
+  onDesktopPairingState: (listener: (state: DesktopPairingState) => void) =>
+    subscribe('product:desktop-pairing-state', listener),
+  onSessionInvalidated: (listener: (bootstrap: ProductBootstrap) => void) =>
+    subscribe('product:session-invalidated', listener),
   onSurfaceMode: (listener: (mode: 'product' | 'assistant') => void) =>
     subscribe('app:surface-mode', listener),
 })

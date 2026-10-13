@@ -6,6 +6,7 @@ import {
   isNearLiveAnswerEdge,
   type AnswerDisplayState,
 } from './answerDisplayState'
+import { consumeVerticalWheel } from './wheelScroll'
 
 function completeAnswer(
   state: AnswerDisplayState,
@@ -100,4 +101,29 @@ test('clear view preserves completed session history', () => {
 test('smart-scroll follows only near the live edge and preserves an older reading position', () => {
   assert.equal(isNearLiveAnswerEdge(1_000, 680, 300), true)
   assert.equal(isNearLiveAnswerEdge(1_000, 300, 300), false)
+})
+
+test('wheel input scrolls a hovered panel and respects its boundaries', () => {
+  const surface = { scrollTop: 100, scrollHeight: 1_000, clientHeight: 300 }
+  assert.equal(consumeVerticalWheel(surface, { deltaY: 75, deltaMode: 0 }), true)
+  assert.equal(surface.scrollTop, 175)
+  surface.scrollTop = 700
+  assert.equal(consumeVerticalWheel(surface, { deltaY: 75, deltaMode: 0 }), false)
+  assert.equal(surface.scrollTop, 700)
+})
+
+test('wheel normalization supports line wheels and page-like trackpad input', () => {
+  const lineSurface = { scrollTop: 0, scrollHeight: 1_000, clientHeight: 200 }
+  assert.equal(consumeVerticalWheel(lineSurface, { deltaY: 3, deltaMode: 1 }), true)
+  assert.equal(lineSurface.scrollTop, 54)
+  const pageSurface = { scrollTop: 500, scrollHeight: 1_000, clientHeight: 200 }
+  assert.equal(consumeVerticalWheel(pageSurface, { deltaY: -1, deltaMode: 2 }), true)
+  assert.equal(pageSurface.scrollTop, 300)
+})
+
+test('wheel input bubbles when a surface cannot scroll so a parent may consume it', () => {
+  const empty = { scrollTop: 0, scrollHeight: 200, clientHeight: 200 }
+  assert.equal(consumeVerticalWheel(empty, { deltaY: 80, deltaMode: 0 }), false)
+  const top = { scrollTop: 0, scrollHeight: 500, clientHeight: 200 }
+  assert.equal(consumeVerticalWheel(top, { deltaY: -40, deltaMode: 0 }), false)
 })

@@ -76,6 +76,26 @@ export const interviewSessions = pgTable('interview_sessions', {
   completedAt: timestamp('completed_at', { withTimezone: true }),
 }, (table) => [index('interview_sessions_user_idx').on(table.userId)])
 
+export const companionPairings = pgTable('companion_pairings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  codeHash: text('code_hash').notNull(),
+  redemptionSecretHash: text('redemption_secret_hash').notNull(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+  interviewId: uuid('interview_id').references(() => interviewSessions.id, { onDelete: 'cascade' }),
+  status: text('status').notNull().default('pending'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  approvedAt: timestamp('approved_at', { withTimezone: true }),
+  redeemedAt: timestamp('redeemed_at', { withTimezone: true }),
+  cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  ...timestamps,
+}, (table) => [
+  uniqueIndex('companion_pairings_code_hash_unique').on(table.codeHash),
+  uniqueIndex('companion_pairings_secret_hash_unique').on(table.redemptionSecretHash),
+  index('companion_pairings_status_expires_idx').on(table.status, table.expiresAt),
+  index('companion_pairings_user_idx').on(table.userId),
+  index('companion_pairings_interview_idx').on(table.interviewId),
+])
+
 export const interviewTurns = pgTable('interview_turns', {
   id: uuid('id').primaryKey().defaultRandom(),
   sessionId: uuid('session_id').notNull().references(() => interviewSessions.id, { onDelete: 'cascade' }),

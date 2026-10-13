@@ -13,11 +13,33 @@ export interface AiProvider {
   summarize(input: string): Promise<string>
 }
 
+export type RealtimeSecretFailureStage =
+  | 'require_key'
+  | 'request_setup'
+  | 'upstream_fetch'
+  | 'response_parse'
+  | 'response_validate'
+
+export interface RealtimeSecretDiagnostic {
+  stage: RealtimeSecretFailureStage
+  errorName: string
+  safeMessage: string
+  causeCode?: string
+  upstreamStatus?: number
+  elapsedMs: number
+}
+
+interface OpenAiProviderOptions {
+  fetcher?: typeof fetch
+  onRealtimeDiagnostic?: (diagnostic: RealtimeSecretDiagnostic) => void
+}
+
 export class OpenAiProvider implements AiProvider {
   constructor(
     private readonly key: string,
     private readonly models: { fast: string; coding: string; summary: string },
     private readonly timeoutMs = 120_000,
+    private readonly options: OpenAiProviderOptions = {},
   ) {}
 
   async *stream(input: AiRequest, signal: AbortSignal): AsyncGenerator<ProviderEvent> {
@@ -67,18 +89,57 @@ export class OpenAiProvider implements AiProvider {
   }
 
   async createRealtimeSecret() {
-    this.requireKey()
-    const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(this.timeoutMs),
-      body: JSON.stringify({ session: { type: 'realtime', model: 'gpt-realtime' } }),
-    })
-    if (!response.ok) throw new Error(`Realtime credential request failed with HTTP ${response.status}.`)
-    const body = await response.json() as { value?: string; expires_at?: number; client_secret?: { value?: string; expires_at?: number } }
-    const value = body.value ?? body.client_secret?.value
-    if (!value) throw new Error('Realtime credential was empty.')
-    return { value, expiresAt: body.expires_at ?? body.client_secret?.expires_at }
+    const startedAt = Date.now()
+    let stage: RealtimeSecretFailureStage = 'require_key'
+    let upstreamStatus: number | undefined
+    try {
+      this.requireKey()
+      stage = 'request_setup'
+      const headers = new Headers({
+        Authorization: `Bearer ${this.key}`,
+        'Content-Type': 'application/json',
+      })
+      const signal = AbortSignal.timeout(this.timeoutMs)
+      const body = JSON.stringify({ session: { type: 'realtime', model: 'gpt-realtime' } })
+
+      stage = 'upstream_fetch'
+      const response = await (this.options.fetcher ?? fetch)('https://api.openai.com/v1/realtime/client_secrets', {
+        method: 'POST',
+        headers,
+        signal,
+        body,
+      })
+      upstreamStatus = response.status
+      if (!response.ok) throw new Error(`Realtime credential request failed with HTTP ${response.status}.`)
+
+      stage = 'response_parse'
+      const parsed: unknown = await response.json()
+      stage = 'response_validate'
+      if (!isRecord(parsed)) throw new Error('Realtime credential response was invalid.')
+      const legacySecret = isRecord(parsed.client_secret) ? parsed.client_secret : undefined
+      const value = typeof parsed.value === 'string'
+        ? parsed.value
+        : typeof legacySecret?.value === 'string'
+          ? legacySecret.value
+          : undefined
+      if (!value) throw new Error('Realtime credential was empty.')
+      const expiresAt = typeof parsed.expires_at === 'number'
+        ? parsed.expires_at
+        : typeof legacySecret?.expires_at === 'number'
+          ? legacySecret.expires_at
+          : undefined
+      return { value, expiresAt }
+    } catch (error) {
+      this.reportRealtimeDiagnostic({
+        stage,
+        errorName: safeErrorName(error),
+        safeMessage: sanitizeRealtimeDiagnostic(error instanceof Error ? error.message : 'Unknown provider failure.', this.key),
+        causeCode: safeCauseCode(error),
+        upstreamStatus,
+        elapsedMs: Date.now() - startedAt,
+      })
+      throw error
+    }
   }
 
   async summarize(input: string) {
@@ -99,4 +160,37 @@ export class OpenAiProvider implements AiProvider {
   private requireKey() {
     if (!this.key) throw new Error('AI provider is not configured.')
   }
+
+  private reportRealtimeDiagnostic(diagnostic: RealtimeSecretDiagnostic) {
+    try {
+      this.options.onRealtimeDiagnostic?.(diagnostic)
+    } catch {
+      // Diagnostics must never replace the original provider failure.
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function safeErrorName(error: unknown) {
+  const name = error instanceof Error ? error.name : 'UnknownError'
+  return /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(name) ? name : 'UnknownError'
+}
+
+function safeCauseCode(error: unknown) {
+  if (!(error instanceof Error) || !isRecord(error.cause)) return undefined
+  const code = error.cause.code
+  return typeof code === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(code) ? code : undefined
+}
+
+function sanitizeRealtimeDiagnostic(message: string, key: string) {
+  let sanitized = message
+  if (key) sanitized = sanitized.replaceAll(key, '[REDACTED_PROVIDER_KEY]')
+  return sanitized
+    .replace(/Bearer\s+[^\s"',}]+/gi, 'Bearer [REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, '[REDACTED_PROVIDER_KEY]')
+    .replace(/\bek[_-][A-Za-z0-9_-]+\b/g, '[REDACTED_CLIENT_SECRET]')
+    .slice(0, 300)
 }

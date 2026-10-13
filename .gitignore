@@ -8,3 +8,22 @@ server/dist/
 .env.*
 !.env.example
 *.zip
+
+# Packaged application and installer output
+release/
+out/
+*.exe
+*.msi
+*.msix
+*.appx
+*.blockmap
+
+# Private signing and TLS material
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Local backup files
+*.bak
+*.backup

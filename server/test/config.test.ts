@@ -7,6 +7,7 @@ const secureProduction = {
   DATABASE_URL: 'postgresql://user:password@db.example.com/app?sslmode=require',
   AI_PROVIDER_KEY: 'test-provider-key',
   PUBLIC_BASE_URL: 'https://api.example.com',
+  WEB_APP_URL: 'https://app.example.com',
   TRUST_PROXY: 'true',
   ALLOWED_ORIGINS: 'https://app.example.com',
   EMAIL_PROVIDER: 'webhook',
@@ -19,6 +20,7 @@ test('production configuration accepts an explicit secure deployment', () => {
   const config = loadConfig(secureProduction)
   assert.equal(config.production, true)
   assert.equal(config.trustProxy, true)
+  assert.equal(config.webAppBaseUrl, 'https://app.example.com')
 })
 
 test('production configuration accepts Resend without a generic webhook URL', () => {
@@ -68,6 +70,10 @@ test('production uses the Render-provided HTTPS hostname when PUBLIC_BASE_URL is
   assert.equal(config.publicBaseUrl, 'https://floating-assistant-api-test.onrender.com')
 })
 
+test('production rejects an insecure website URL used in account emails', () => {
+  assert.throws(() => loadConfig({ ...secureProduction, WEB_APP_URL: 'http://app.example.com' }))
+})
+
 for (const [name, override] of [
   ['database TLS', { DATABASE_URL: 'postgresql://user:password@db.example.com/app' }],
   ['provider key', { AI_PROVIDER_KEY: '' }],
@@ -84,8 +90,21 @@ for (const [name, override] of [
 }
 
 test('development keeps localhost HTTP available but still requires a database URL', () => {
-  assert.equal(loadConfig({ NODE_ENV: 'development', DATABASE_URL: 'postgresql://localhost/dev' }).publicBaseUrl, 'http://localhost:3001')
+  const config = loadConfig({ NODE_ENV: 'development', DATABASE_URL: 'postgresql://localhost/dev' })
+  assert.equal(config.publicBaseUrl, 'http://localhost:3001')
+  assert.ok(config.allowedOrigins.includes('http://localhost:5174'))
+  assert.equal(config.documentMaxFileBytes, 5 * 1024 * 1024)
+  assert.equal(config.documentMaxExtractedChars, 500_000)
   assert.throws(() => loadConfig({ NODE_ENV: 'development' }))
+})
+
+test('document extraction limits are configurable positive integers', () => {
+  const config = loadConfig({ NODE_ENV: 'development', DATABASE_URL: 'postgresql://localhost/dev', DOCUMENT_MAX_FILE_BYTES: '2048', DOCUMENT_MAX_EXTRACTED_CHARS: '1024', DOCUMENT_MAX_PDF_PAGES: '12', DOCUMENT_PROCESSING_TIMEOUT_MS: '3000' })
+  assert.equal(config.documentMaxFileBytes, 2048)
+  assert.equal(config.documentMaxExtractedChars, 1024)
+  assert.equal(config.documentMaxPdfPages, 12)
+  assert.equal(config.documentProcessingTimeoutMs, 3000)
+  assert.throws(() => loadConfig({ NODE_ENV: 'development', DATABASE_URL: 'postgresql://localhost/dev', DOCUMENT_MAX_FILE_BYTES: '0' }))
 })
 
 test('configuration rejects an unknown database TLS mode', () => {

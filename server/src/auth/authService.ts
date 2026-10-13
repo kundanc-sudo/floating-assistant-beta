@@ -9,6 +9,7 @@ interface AuthOptions {
   passwordResetTtlMinutes: number
   emailVerificationTtlHours: number
   publicBaseUrl: string
+  webAppBaseUrl: string
   betaMode: boolean
   development: boolean
 }
@@ -92,7 +93,7 @@ export class AuthService {
       await this.email.sendPasswordReset({
         email: user.email,
         displayName: user.displayName,
-        resetUrl: `${this.options.publicBaseUrl}/reset-password?token=${encodeURIComponent(token)}`,
+        resetUrl: `${this.options.webAppBaseUrl}/reset-password?token=${encodeURIComponent(token)}`,
       }).catch(() => this.logEmailFailure('password_reset', user.id))
     }
     return { message: 'If an account exists for this email, password reset instructions have been sent.' }
@@ -105,9 +106,13 @@ export class AuthService {
     await this.store.updatePasswordAndRevokeSessions(user.id, await hash(password, 12))
   }
 
+  validatePasswordResetToken(token: string) {
+    return this.store.hasValidAuthToken(hashToken(token), 'password_reset', new Date())
+  }
+
   async resendVerification(user: UserRecord) {
     if (user.emailVerifiedAt) return
-    await this.sendVerification(user)
+    await this.sendVerification(user, true)
   }
 
   async verifyEmail(token: string) {
@@ -119,10 +124,10 @@ export class AuthService {
   async deleteAccount(user: UserRecord, password: string, confirmation: string) {
     if (confirmation !== 'DELETE') throw badRequest('Type DELETE to confirm account deletion.')
     if (!await compare(password, user.passwordHash)) throw unauthorized('Password is incorrect.')
-    await this.store.deleteUser(user.id)
+    if (!await this.store.deleteUser(user.id)) throw error(500, 'Account deletion could not be completed.')
   }
 
-  private async sendVerification(user: UserRecord) {
+  private async sendVerification(user: UserRecord, reportDeliveryFailure = false) {
     await this.store.invalidateAuthTokens(user.id, 'email_verification')
     const token = randomBytes(32).toString('base64url')
     await this.store.createAuthToken({
@@ -134,8 +139,11 @@ export class AuthService {
     await this.email.sendEmailVerification({
       email: user.email,
       displayName: user.displayName,
-      verificationUrl: `${this.options.publicBaseUrl}/verify-email?token=${encodeURIComponent(token)}`,
-    }).catch(() => this.logEmailFailure('email_verification', user.id))
+      verificationUrl: `${this.options.webAppBaseUrl}/verify-email?token=${encodeURIComponent(token)}`,
+    }).catch(() => {
+      this.logEmailFailure('email_verification', user.id)
+      if (reportDeliveryFailure) throw error(503, 'Verification email could not be sent. Please try again later.', 'EMAIL_DELIVERY_FAILED')
+    })
   }
 
   private async issueSession(user: UserRecord, deviceLabel: string) {

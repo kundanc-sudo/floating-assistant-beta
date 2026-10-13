@@ -4,6 +4,7 @@ import { AudioCaptureService } from './services/audioCaptureService'
 import { SystemAudioCaptureService } from './services/systemAudioCaptureService'
 import { AnswerDisplay } from './components/AnswerDisplay'
 import { answerDisplayReducer, initialAnswerDisplayState } from './services/answerDisplayState'
+import { consumeVerticalWheel } from './services/wheelScroll'
 import { ProductShell } from './product/ProductShell'
 
 interface ActiveInterview {
@@ -780,9 +781,10 @@ function AssistantApp({ activeInterview, onEndInterview }: {
 
       <div className="assistant-title-row">
         <div className="assistant-title-copy">
-          <h1>Floating Assistant</h1>
+          <span className="assistant-kicker">Floating Assistant</span>
+          <h1>{activeInterview.name}</h1>
           <span className="active-interview-label">
-            {[activeInterview.name, activeInterview.company, activeInterview.role].filter(Boolean).join(' · ')}
+            {[activeInterview.company, activeInterview.role].filter(Boolean).join(' · ') || 'Interview session'}
           </span>
         </div>
         <div className="assistant-status-stack">
@@ -856,7 +858,16 @@ function AssistantApp({ activeInterview, onEndInterview }: {
         )}
       </section>}
 
-      <section className={`transcript-panel ${transcriptOpen ? 'is-open' : 'is-collapsed'}`} aria-live="polite">
+      <section
+        className={`transcript-panel ${transcriptOpen ? 'is-open' : 'is-collapsed'}`}
+        aria-live="polite"
+        tabIndex={transcriptOpen ? 0 : -1}
+        onWheel={(event) => {
+          if (!transcriptOpen || !consumeVerticalWheel(event.currentTarget, event)) return
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+      >
         <button className="transcript-toggle" type="button" onClick={() => setTranscriptOpen((open) => !open)} aria-expanded={transcriptOpen}>
           Transcript {transcriptOpen ? '▴' : '▾'}
         </button>
@@ -974,6 +985,11 @@ function AssistantApp({ activeInterview, onEndInterview }: {
           value={workspaceInput}
           onChange={(event) => setWorkspaceInput(event.target.value)}
           onKeyDown={handleWorkspaceKeyDown}
+          onWheel={(event) => {
+            if (!consumeVerticalWheel(event.currentTarget, event)) return
+            event.preventDefault()
+            event.stopPropagation()
+          }}
           placeholder="Add an instruction or ask about the capture…"
           rows={2}
         />
@@ -1095,6 +1111,14 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true
+    const unsubscribeInvalidation = window.productAPI.onSessionInvalidated((value) => {
+      if (!mounted) return
+      void microphoneCapture.stop()
+      void systemAudioCapture.stop()
+      setActiveInterview(null)
+      setStartupError('')
+      setBootstrap(value)
+    })
     void window.productAPI.getBootstrap()
       .then((value) => {
         if (mounted) setBootstrap(value)
@@ -1104,7 +1128,7 @@ export default function App() {
           setStartupError(caught instanceof Error ? caught.message : 'The application could not be initialized.')
         }
       })
-    return () => { mounted = false }
+    return () => { mounted = false; unsubscribeInvalidation() }
   }, [])
 
   if (startupError) {
@@ -1129,6 +1153,7 @@ export default function App() {
 
   return (
     <ProductShell
+      key={bootstrap.user?.id ?? bootstrap.sessionState ?? 'signed-out'}
       bootstrap={bootstrap}
       onBootstrap={setBootstrap}
       onStartAssistant={(interview, next) => {

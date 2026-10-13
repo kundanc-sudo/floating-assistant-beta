@@ -32,7 +32,10 @@ export function ProductShell({ bootstrap, onBootstrap, onStartAssistant }: Produ
   const [role, setRole] = useState('')
 
   if (!bootstrap.user) {
-    return <LoginScreen onAuthenticated={onBootstrap} />
+    if (bootstrap.sessionState === 'offline') {
+      return <SessionRecoveryScreen onBootstrap={onBootstrap} />
+    }
+    return <LoginScreen onAuthenticated={onBootstrap} onPaired={onStartAssistant} />
   }
 
   const beginSetup = async (profileId?: string) => {
@@ -247,7 +250,52 @@ export function ProductShell({ bootstrap, onBootstrap, onStartAssistant }: Produ
   )
 }
 
-function LoginScreen({ onAuthenticated }: { onAuthenticated: (bootstrap: ProductBootstrap) => void }) {
+function SessionRecoveryScreen({ onBootstrap }: { onBootstrap: (bootstrap: ProductBootstrap) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const retry = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      onBootstrap(await window.productAPI.retrySession())
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The server is still unavailable.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const signOut = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      onBootstrap(await window.productAPI.clearLocalData())
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The local session could not be cleared.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <main className="login-shell">
+    <div className="login-titlebar"><span>Floating Assistant</span><button type="button" onClick={() => window.overlayAPI.quitApp()}>×</button></div>
+    <section className="login-card recovery-card" aria-labelledby="session-recovery-title">
+      <div className="product-mark large">FA</div>
+      <h1 id="session-recovery-title">Connection unavailable</h1>
+      <p>Your encrypted desktop session is still saved. Reconnect to validate it before private interview information is shown.</p>
+      {error && <p className="product-error" role="alert">{error}</p>}
+      <button className="primary-action" type="button" onClick={() => void retry()} disabled={busy}>{busy ? 'Checking…' : 'Retry Connection'}</button>
+      <button className="link-action" type="button" onClick={() => void signOut()} disabled={busy}>Sign out on this device</button>
+      <small>Audio and AI features remain stopped until you explicitly open the interview and start listening.</small>
+    </section>
+  </main>
+}
+
+function LoginScreen({ onAuthenticated, onPaired }: {
+  onAuthenticated: (bootstrap: ProductBootstrap) => void
+  onPaired: (interview: { id: string; name: string; company?: string; role?: string }, bootstrap: ProductBootstrap) => void
+}) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -257,6 +305,11 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (bootstrap: Product
   const [resetToken, setResetToken] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [pairingMode, setPairingMode] = useState(false)
+
+  if (pairingMode) {
+    return <PairingScreen onBack={() => setPairingMode(false)} onConnected={onPaired} />
+  }
 
   const submit = async () => {
     setBusy(true)
@@ -297,6 +350,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (bootstrap: Product
         <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={createMode ? 'new-password' : 'current-password'} /></label>
         {error && <p className="product-error">{error}</p>}
         <button className="primary-action" type="button" onClick={() => void submit()} disabled={busy}>{resetMode ? 'Reset Password' : createMode ? 'Create Account' : 'Sign In'}</button>
+        {!resetMode && !createMode && <button className="pairing-entry-action" type="button" onClick={() => setPairingMode(true)} disabled={busy}>Connect to Website</button>}
         {!resetMode && <button className="link-action" type="button" onClick={() => setCreateMode((value) => !value)}>{createMode ? 'Back to sign in' : 'Create account'}</button>}
         {!createMode && <button className="link-action" type="button" onClick={async () => {
           if (resetMode) { setResetMode(false); return }
@@ -309,6 +363,76 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (bootstrap: Product
       </section>
     </main>
   )
+}
+
+function PairingScreen({ onBack, onConnected }: {
+  onBack: () => void
+  onConnected: (interview: { id: string; name: string; company?: string; role?: string }, bootstrap: ProductBootstrap) => void
+}) {
+  const [pairing, setPairing] = useState<DesktopPairingState>({ status: 'idle' })
+  const [secondsRemaining, setSecondsRemaining] = useState(0)
+
+  useEffect(() => {
+    const applyState = (state: DesktopPairingState) => setPairing(state)
+    const unsubscribe = window.productAPI.onDesktopPairingState(applyState)
+    void window.productAPI.getDesktopPairing().then(applyState)
+    return () => {
+      unsubscribe()
+      void window.productAPI.cancelDesktopPairing()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!pairing.expiresAt || !['pending', 'approved'].includes(pairing.status)) {
+      setSecondsRemaining(0)
+      return
+    }
+    const update = () => setSecondsRemaining(Math.max(0, Math.ceil((Date.parse(pairing.expiresAt!) - Date.now()) / 1_000)))
+    update()
+    const timer = window.setInterval(update, 1_000)
+    return () => window.clearInterval(timer)
+  }, [pairing.expiresAt, pairing.status])
+
+  const generate = async () => {
+    setPairing({ status: 'pending' })
+    try {
+      setPairing(await window.productAPI.startDesktopPairing())
+    } catch {
+      setPairing({ status: 'failed', error: 'A pairing code could not be created. Check your connection and try again.' })
+    }
+  }
+
+  const cancel = async () => {
+    try { setPairing(await window.productAPI.cancelDesktopPairing()) } catch { setPairing({ status: 'cancelled' }) }
+  }
+
+  const waiting = pairing.status === 'pending' || pairing.status === 'approved'
+  return <main className="login-shell">
+    <div className="login-titlebar"><span>Floating Assistant</span><button type="button" onClick={() => window.overlayAPI.quitApp()}>×</button></div>
+    <section className="login-card pairing-card" aria-labelledby="desktop-pairing-title">
+      <div className="product-mark large">FA</div>
+      <h1 id="desktop-pairing-title">Connect to Website</h1>
+      <p>Generate a one-time code, then approve it from an active interview on the Floating Assistant website.</p>
+      {pairing.pairingCode && waiting && <div className="pairing-code-block" aria-live="polite">
+        <span>One-time pairing code</span>
+        <strong>{pairing.pairingCode}</strong>
+        <small>{pairing.status === 'approved' ? 'Approved. Securing your desktop session…' : `Expires in ${formatCountdown(secondsRemaining)}`}</small>
+      </div>}
+      {pairing.status === 'pending' && !pairing.pairingCode && <div className="pairing-state" role="status">Creating a secure pairing code…</div>}
+      {pairing.status === 'expired' && <div className="pairing-state error" role="alert">This code expired. Generate a new code to continue.</div>}
+      {pairing.status === 'failed' && <div className="pairing-state error" role="alert">{pairing.error ?? 'Desktop pairing failed. Generate a new code to try again.'}</div>}
+      {pairing.status === 'cancelled' && <div className="pairing-state" role="status">Pairing cancelled.</div>}
+      {pairing.status === 'connected' && pairing.connection && <div className="pairing-state connected" role="status">Connected securely to <strong>{pairing.connection.interview.name}</strong>. Audio has not started.</div>}
+      {pairing.error && pairing.status === 'pending' && <div className="pairing-state warning" role="status">{pairing.error}</div>}
+      <div className="pairing-actions">
+        {pairing.status === 'connected' && pairing.connection && <button className="primary-action" type="button" onClick={() => onConnected(pairing.connection!.interview, pairing.connection!.bootstrap)}>Open Approved Interview</button>}
+        {!waiting && pairing.status !== 'connected' && <button className="primary-action" type="button" onClick={() => void generate()}>Generate Pairing Code</button>}
+        {waiting && <button className="secondary-action" type="button" onClick={() => void cancel()}>Cancel Pairing</button>}
+        <button className="link-action" type="button" onClick={onBack}>Back to sign in</button>
+      </div>
+      <small>The pairing secret and desktop session stay protected in the Windows companion.</small>
+    </section>
+  </main>
 }
 
 function Dashboard({ bootstrap, busy, onNew, onOpen, onDelete }: {
@@ -325,7 +449,7 @@ function Dashboard({ bootstrap, busy, onNew, onOpen, onDelete }: {
       {bootstrap.interviews.length === 0 && <div className="empty-product-state">No interviews yet. Create your first prepared session.</div>}
       {bootstrap.interviews.map((interview) => <article key={interview.id} className="interview-row">
         <div><strong>{interview.name}</strong><span>{[interview.company, interview.role].filter(Boolean).join(' · ') || 'Interview session'}</span></div>
-        <div className="interview-meta"><span>{formatLocalDate(interview.updatedAt)} · {interview.status}</span><button type="button" onClick={() => onOpen(interview.id)} disabled={busy}>Open</button><button type="button" onClick={() => onDelete(interview.id)} disabled={busy}>Delete</button></div>
+        <div className="interview-meta"><span>{formatLocalDate(interview.updatedAt)} · {interview.status}</span><button type="button" onClick={() => onOpen(interview.id)} disabled={busy || interview.status !== 'active'}>{interview.status === 'active' ? 'Open' : 'Completed'}</button><button type="button" onClick={() => onDelete(interview.id)} disabled={busy}>Delete</button></div>
       </article>)}
     </div>
   </section>
@@ -364,4 +488,10 @@ function formatLocalDate(timestamp: number) {
   const today = new Date()
   if (date.toDateString() === today.toDateString()) return 'Today'
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function formatCountdown(seconds: number) {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return `${minutes}:${remainder.toString().padStart(2, '0')}`
 }

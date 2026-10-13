@@ -53,6 +53,7 @@ import {
 import { ApiAnswerService, type AnswerRoute } from './services/apiAnswerService'
 import { ApiClient } from './services/apiClient'
 import { ApiProductService } from './services/apiProductService'
+import { CompanionPairingService, type DesktopPairingPublicState } from './services/companionPairingService'
 import {
   SharePublisherService,
 } from './services/sharePublisherService'
@@ -90,8 +91,10 @@ const MAX_IMAGE_EDGE = 3200
 const PREVIEW_IMAGE_EDGE = 960
 const BUBBLE_SIZE = 52
 const SELECTION_INPUT_OPACITY = 1 / 255
-const OVERLAY_MIN_WIDTH = 320
-const OVERLAY_MIN_HEIGHT = 180
+const OVERLAY_MIN_WIDTH = 360
+const OVERLAY_MIN_HEIGHT = 380
+const OVERLAY_DEFAULT_WIDTH = 440
+const OVERLAY_DEFAULT_HEIGHT = 600
 const PRODUCT_MIN_WIDTH = 800
 const PRODUCT_MIN_HEIGHT = 560
 const PRODUCT_DEFAULT_WIDTH = 1040
@@ -102,6 +105,8 @@ type AppSurfaceMode = 'product' | 'assistant'
 let appSurfaceMode: AppSurfaceMode = 'product'
 let assistantBounds: Rectangle | null = null
 let productService: ApiProductService
+let companionPairing: CompanionPairingService
+let lastDesktopSessionValidationAt = 0
 type WindowMode = 'expanded' | 'bubble'
 interface MainWindowRuntimeState {
   privacyEnabled: boolean
@@ -413,7 +418,7 @@ function setAssistantSurface(): AppSurfaceMode {
   overlayWindow.setResizable(false)
   overlayWindow.setMinimumSize(OVERLAY_MIN_WIDTH, OVERLAY_MIN_HEIGHT)
   const target = clampBoundsToDisplay(
-    assistantBounds ?? { x: 0, y: 0, width: 420, height: 260 },
+    assistantBounds ?? { x: 0, y: 0, width: OVERLAY_DEFAULT_WIDTH, height: OVERLAY_DEFAULT_HEIGHT },
   )
   overlayWindow.setBounds(target)
   if (!assistantBounds) overlayWindow.center()
@@ -472,7 +477,7 @@ function expandFromBubble(): WindowMode {
     return mainWindowRuntimeState.presentationMode
   }
 
-  const remembered = mainWindowRuntimeState.expandedBounds ?? { x: 0, y: 0, width: 420, height: 260 }
+  const remembered = mainWindowRuntimeState.expandedBounds ?? { x: 0, y: 0, width: OVERLAY_DEFAULT_WIDTH, height: OVERLAY_DEFAULT_HEIGHT }
   const bubble = bubbleBounds ?? overlayWindow.getBounds()
   const targetBounds = bubbleWasMoved
     ? {
@@ -884,6 +889,10 @@ function registerProductShellHandlers() {
     if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
     return await bootstrap()
   })
+  ipcMain.handle('product:retry-session', async (event) => {
+    if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
+    return productService.retrySessionRestoration()
+  })
   ipcMain.handle('product:login', async (event, value: unknown) => {
     if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
     if (!value || typeof value !== 'object') return { success: false, error: 'Enter your login details.' }
@@ -892,6 +901,7 @@ function registerProductShellHandlers() {
       return { success: false, error: 'Enter your email and password.' }
     }
     try {
+      companionPairing.cancel()
       await productService.login(
         candidate.email,
         candidate.password,
@@ -911,6 +921,7 @@ function registerProductShellHandlers() {
     interviewContext.reset()
     sendInterviewContextStatus()
     await productService.logout()
+    companionPairing.cancel()
     setProductSurface()
     return await bootstrap()
   })
@@ -1004,7 +1015,7 @@ function registerProductShellHandlers() {
     if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
     if (typeof id !== 'string') return { success: false, error: 'Interview was not found.' }
     try {
-      const session = await productService.reopenInterview(id)
+      const session = await productService.loadActiveInterview(id)
       interviewContext.load(session.context)
       sessionMemory.reset()
       sendInterviewContextStatus()
@@ -1135,9 +1146,25 @@ function registerProductShellHandlers() {
     sessionMemory.reset()
     interviewContext.reset()
     await productService.clearLocalData()
+    companionPairing.cancel()
     sendInterviewContextStatus()
     setProductSurface()
     return await bootstrap()
+  })
+  ipcMain.handle('product:start-desktop-pairing', async (event) => {
+    if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
+    if (productService.isAuthenticated()) {
+      return { status: 'failed', error: 'Sign out before connecting a different website account.' } satisfies DesktopPairingPublicState
+    }
+    return companionPairing.start()
+  })
+  ipcMain.handle('product:get-desktop-pairing', (event) => {
+    if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
+    return companionPairing.getState()
+  })
+  ipcMain.handle('product:cancel-desktop-pairing', (event) => {
+    if (!isOverlaySender(event)) throw new Error('Unauthorized IPC sender.')
+    return companionPairing.cancel()
   })
 }
 
@@ -2827,6 +2854,13 @@ function createOverlayWindow() {
   })
   overlayWindow.on('focus', () => {
     if (!app.isPackaged) console.info('[Focus] mainWindow focus reason=user-interaction')
+    const now = Date.now()
+    if (productService?.isAuthenticated() && now - lastDesktopSessionValidationAt >= 30_000) {
+      lastDesktopSessionValidationAt = now
+      void productService.validateSession().catch(() => {
+        // A temporary network failure must not clear the encrypted desktop session.
+      })
+    }
   })
   overlayWindow.on('blur', () => {
     if (!app.isPackaged) {
@@ -2887,6 +2921,35 @@ app.whenReady().then(async () => {
   ))
   productService = new ApiProductService(apiClient)
   await productService.initialize()
+  companionPairing = new CompanionPairingService(
+    apiClient,
+    async ({ token, interviewId }) => {
+      const pairedInterview = await productService.acceptPairedSession(token, interviewId)
+      interviewContext.load(pairedInterview.context)
+      sessionMemory.reset()
+      sendInterviewContextStatus()
+      setAssistantSurface()
+      return {
+        interview: toPublicInterview(pairedInterview),
+        bootstrap: await productService.getBootstrap(),
+      }
+    },
+    (state) => sendToOverlay('product:desktop-pairing-state', state),
+  )
+  apiClient.onAuthenticationInvalidated(() => {
+    productService.invalidateSession()
+    companionPairing.cancel()
+    stopRealtimeAssistants()
+    sessionMemory?.reset()
+    interviewContext?.reset()
+    pendingAttachmentContexts = []
+    sendPendingAttachments()
+    sendInterviewContextStatus()
+    setProductSurface()
+    void productService.getBootstrap().then((bootstrap) => {
+      sendToOverlay('product:session-invalidated', bootstrap)
+    })
+  })
   sessionMemory = new SessionMemoryService(
     (message) => { if (!app.isPackaged) console.info(message) },
     (previous, segments) => productService.summarize(
@@ -2929,6 +2992,7 @@ app.on('will-quit', () => {
   void sharePublisher.stop()
   void closeSelectionWindows()
   stopRealtimeAssistants()
+  companionPairing?.dispose()
   globalShortcut.unregisterAll()
 })
 app.on('window-all-closed', () => app.quit())

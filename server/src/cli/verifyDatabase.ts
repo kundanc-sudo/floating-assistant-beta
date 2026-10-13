@@ -10,7 +10,7 @@ const databaseUrl = process.env.DATABASE_URL?.trim()
 if (!databaseUrl) throw new Error('DATABASE_URL is required in server/.env or the process environment.')
 const databaseSslMode = parseDatabaseSslMode(process.env.DATABASE_SSL_MODE)
 
-const expectedTables = ['auth_sessions', 'auth_tokens', 'beta_invites', 'candidate_profiles', 'interview_sessions', 'interview_turns', 'usage_events', 'users']
+const expectedTables = ['auth_sessions', 'auth_tokens', 'beta_invites', 'candidate_profiles', 'companion_pairings', 'interview_sessions', 'interview_turns', 'usage_events', 'users']
 const expectedColumns = ['auth_sessions.device_label', 'auth_sessions.last_used_at', 'users.email_verified_at']
 const expectedIndexes = ['auth_sessions_user_last_used_idx', 'auth_tokens_hash_unique', 'beta_invites_code_hash_unique', 'usage_events_user_created_idx']
 const client = new pg.Client({ connectionString: databaseConnectionString(databaseUrl, databaseSslMode) })

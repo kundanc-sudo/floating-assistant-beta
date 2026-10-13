@@ -72,6 +72,23 @@ export interface UsageRecord {
   createdAt: Date
 }
 
+export type CompanionPairingState = 'pending' | 'approved' | 'redeemed' | 'cancelled'
+
+export interface CompanionPairingRecord {
+  id: string
+  codeHash: string
+  redemptionSecretHash: string
+  userId: string | null
+  interviewId: string | null
+  status: CompanionPairingState
+  expiresAt: Date
+  approvedAt: Date | null
+  redeemedAt: Date | null
+  cancelledAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+}
+
 export interface ProductStore {
   createUser(input: { email: string; passwordHash: string; displayName: string }): Promise<UserRecord>
   findUserByEmail(email: string): Promise<UserRecord | null>
@@ -85,7 +102,13 @@ export interface ProductStore {
   listSessions(userId: string): Promise<AuthSessionRecord[]>
   deleteOtherSessions(userId: string, currentSessionId: string): Promise<number>
   trimSessions(userId: string, keep: number): Promise<void>
+  createCompanionPairing(input: { codeHash: string; redemptionSecretHash: string; expiresAt: Date }): Promise<Pick<CompanionPairingRecord, 'id' | 'expiresAt'>>
+  approveCompanionPairing(input: { userId: string; interviewId: string; codeHash: string; now: Date }): Promise<Pick<CompanionPairingRecord, 'id' | 'expiresAt'> | null>
+  getCompanionPairingStatus(id: string, redemptionSecretHash: string, now: Date): Promise<'pending' | 'approved' | null>
+  redeemCompanionPairing(input: { id: string; redemptionSecretHash: string; tokenHash: string; deviceLabel: string; sessionExpiresAt: Date; now: Date; maxSessionsPerUser: number }): Promise<{ interviewId: string; session: AuthSessionRecord } | null>
+  cancelCompanionPairingsForUser(userId: string, at: Date): Promise<void>
   createAuthToken(input: { userId: string; type: AuthTokenType; tokenHash: string; expiresAt: Date }): Promise<void>
+  hasValidAuthToken(tokenHash: string, type: AuthTokenType, now: Date): Promise<boolean>
   consumeAuthToken(tokenHash: string, type: AuthTokenType, now: Date): Promise<UserRecord | null>
   invalidateAuthTokens(userId: string, type: AuthTokenType): Promise<void>
   updatePasswordAndRevokeSessions(userId: string, passwordHash: string): Promise<void>

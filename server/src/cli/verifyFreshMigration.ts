@@ -28,7 +28,7 @@ try {
   try {
     await migrate(drizzle(pool), { migrationsFolder: path.join(serverDirectory, 'drizzle') })
     const result = await pool.query<{ table_name: string }>("select table_name from information_schema.tables where table_schema='public' order by table_name")
-    const expected = ['auth_sessions', 'auth_tokens', 'beta_invites', 'candidate_profiles', 'interview_sessions', 'interview_turns', 'usage_events', 'users']
+    const expected = ['auth_sessions', 'auth_tokens', 'beta_invites', 'candidate_profiles', 'companion_pairings', 'interview_sessions', 'interview_turns', 'usage_events', 'users']
     const tables = result.rows.map((row) => row.table_name)
     const missing = expected.filter((name) => !tables.includes(name))
     if (missing.length > 0) throw new Error(`Fresh migration is missing tables: ${missing.join(', ')}`)

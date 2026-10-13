@@ -2,8 +2,16 @@ import type { ProductStorage } from './productShellService'
 
 interface SecureClientState {
   token?: string
+  pairedInterviewId?: string
   defaultAutoAssist?: boolean
   pendingTurns?: PendingTurn[]
+}
+
+export class ApiClientError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message)
+    this.name = 'ApiClientError'
+  }
 }
 
 export interface PendingTurn {
@@ -16,6 +24,7 @@ export interface PendingTurn {
 
 export class ApiClient {
   private state: SecureClientState = {}
+  private authenticationInvalidated?: () => void
 
   constructor(
     readonly baseUrl: string,
@@ -28,6 +37,7 @@ export class ApiClient {
       const value = stored as SecureClientState
       this.state = {
         token: typeof value.token === 'string' ? value.token : undefined,
+        pairedInterviewId: typeof value.pairedInterviewId === 'string' ? value.pairedInterviewId : undefined,
         defaultAutoAssist: Boolean(value.defaultAutoAssist),
         pendingTurns: Array.isArray(value.pendingTurns) ? value.pendingTurns.slice(-20) : [],
       }
@@ -37,10 +47,24 @@ export class ApiClient {
   hasToken() { return Boolean(this.state.token) }
   getSettings() { return { defaultAutoAssist: Boolean(this.state.defaultAutoAssist) } }
   getPendingTurns() { return [...(this.state.pendingTurns ?? [])] }
+  getPairedInterviewId() { return this.state.pairedInterviewId }
+  onAuthenticationInvalidated(listener: () => void) { this.authenticationInvalidated = listener }
 
   async setToken(token?: string) {
     this.state.token = token
+    this.state.pairedInterviewId = undefined
     if (!token) this.state.pendingTurns = []
+    await this.persist()
+  }
+
+  async setPairedSession(token: string, interviewId: string) {
+    this.state.token = token
+    this.state.pairedInterviewId = interviewId
+    await this.persist()
+  }
+
+  async clearPairedInterviewId() {
+    this.state.pairedInterviewId = undefined
     await this.persist()
   }
 
@@ -60,20 +84,32 @@ export class ApiClient {
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return this.performRequest(path, init, true)
+  }
+
+  async requestAnonymous<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return this.performRequest(path, init, false)
+  }
+
+  private async performRequest<T>(path: string, init: RequestInit, authenticated: boolean): Promise<T> {
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
     if (init.body) headers.set('Content-Type', 'application/json')
-    if (this.state.token) headers.set('Authorization', `Bearer ${this.state.token}`)
+    const requestToken = authenticated ? this.state.token : undefined
+    if (requestToken) headers.set('Authorization', `Bearer ${requestToken}`)
     let response: Response
     try {
       response = await fetch(`${this.baseUrl}${path}`, { ...init, headers })
     } catch {
-      throw new Error('The backend is unavailable. Check the server and your network connection.')
+      throw new ApiClientError('The backend is unavailable. Check the server and your network connection.', 0, 'NETWORK_ERROR')
     }
     if (!response.ok) {
-      if (response.status === 401) await this.setToken(undefined)
-      const body = await response.json().catch(() => ({})) as { error?: string }
-      throw new Error(body.error ?? `Backend request failed with HTTP ${response.status}.`)
+      const body = await response.json().catch(() => ({})) as { error?: string; code?: string }
+      if (authenticated && response.status === 401 && requestToken && this.state.token === requestToken) {
+        await this.setToken(undefined)
+        this.authenticationInvalidated?.()
+      }
+      throw new ApiClientError(body.error ?? `Backend request failed with HTTP ${response.status}.`, response.status, body.code)
     }
     if (response.status === 204) return undefined as T
     return response.json() as Promise<T>
@@ -81,7 +117,8 @@ export class ApiClient {
 
   async stream(path: string, body: unknown, signal: AbortSignal) {
     const headers = new Headers({ Accept: 'text/event-stream', 'Content-Type': 'application/json' })
-    if (this.state.token) headers.set('Authorization', `Bearer ${this.state.token}`)
+    const requestToken = this.state.token
+    if (requestToken) headers.set('Authorization', `Bearer ${requestToken}`)
     let response: Response
     try {
       response = await fetch(`${this.baseUrl}${path}`, { method: 'POST', headers, body: JSON.stringify(body), signal })
@@ -91,6 +128,10 @@ export class ApiClient {
     }
     if (!response.ok) {
       const result = await response.json().catch(() => ({})) as { error?: string }
+      if (response.status === 401 && requestToken && this.state.token === requestToken) {
+        await this.setToken(undefined)
+        this.authenticationInvalidated?.()
+      }
       throw new Error(result.error ?? `AI request failed with HTTP ${response.status}.`)
     }
     if (!response.body) throw new Error('The backend returned an empty stream.')

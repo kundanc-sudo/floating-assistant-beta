@@ -70,8 +70,86 @@ export function createPostgresStore(databaseUrl: string, options: { max?: number
       const stale = await db.select({ id: schema.authSessions.id }).from(schema.authSessions).where(eq(schema.authSessions.userId, userId)).orderBy(desc(schema.authSessions.lastUsedAt)).offset(keep)
       if (stale.length > 0) await db.delete(schema.authSessions).where(inArray(schema.authSessions.id, stale.map((row) => row.id)))
     },
+    async createCompanionPairing(input) {
+      const [row] = await db.insert(schema.companionPairings).values(input).returning({ id: schema.companionPairings.id, expiresAt: schema.companionPairings.expiresAt })
+      return row
+    },
+    async approveCompanionPairing(input) {
+      const [row] = await db.update(schema.companionPairings)
+        .set({ userId: input.userId, interviewId: input.interviewId, status: 'approved', approvedAt: input.now, updatedAt: input.now })
+        .where(and(
+          eq(schema.companionPairings.codeHash, input.codeHash),
+          eq(schema.companionPairings.status, 'pending'),
+          gt(schema.companionPairings.expiresAt, input.now),
+          sql`exists (
+            select 1 from ${schema.interviewSessions}
+            where ${schema.interviewSessions.id} = ${input.interviewId}
+              and ${schema.interviewSessions.userId} = ${input.userId}
+              and ${schema.interviewSessions.status} = 'active'
+          )`,
+        ))
+        .returning({ id: schema.companionPairings.id, expiresAt: schema.companionPairings.expiresAt })
+      return row ?? null
+    },
+    async getCompanionPairingStatus(id, redemptionSecretHash, now) {
+      const [row] = await db.select({ status: schema.companionPairings.status })
+        .from(schema.companionPairings)
+        .where(and(
+          eq(schema.companionPairings.id, id),
+          eq(schema.companionPairings.redemptionSecretHash, redemptionSecretHash),
+          inArray(schema.companionPairings.status, ['pending', 'approved']),
+          gt(schema.companionPairings.expiresAt, now),
+        ))
+        .limit(1)
+      return row?.status === 'pending' || row?.status === 'approved' ? row.status : null
+    },
+    async redeemCompanionPairing(input) {
+      return db.transaction(async (tx) => {
+        const [pairing] = await tx.update(schema.companionPairings)
+          .set({ status: 'redeemed', redeemedAt: input.now, updatedAt: input.now })
+          .where(and(
+            eq(schema.companionPairings.id, input.id),
+            eq(schema.companionPairings.redemptionSecretHash, input.redemptionSecretHash),
+            eq(schema.companionPairings.status, 'approved'),
+            gt(schema.companionPairings.expiresAt, input.now),
+            sql`exists (
+              select 1 from ${schema.interviewSessions}
+              where ${schema.interviewSessions.id} = ${schema.companionPairings.interviewId}
+                and ${schema.interviewSessions.userId} = ${schema.companionPairings.userId}
+                and ${schema.interviewSessions.status} = 'active'
+            )`,
+          ))
+          .returning({ userId: schema.companionPairings.userId, interviewId: schema.companionPairings.interviewId })
+        if (!pairing?.userId || !pairing.interviewId) return null
+
+        const [session] = await tx.insert(schema.authSessions).values({
+          userId: pairing.userId,
+          tokenHash: input.tokenHash,
+          deviceLabel: input.deviceLabel,
+          expiresAt: input.sessionExpiresAt,
+        }).returning()
+        const stale = await tx.select({ id: schema.authSessions.id })
+          .from(schema.authSessions)
+          .where(eq(schema.authSessions.userId, pairing.userId))
+          .orderBy(desc(schema.authSessions.lastUsedAt), desc(schema.authSessions.createdAt))
+          .offset(input.maxSessionsPerUser)
+        if (stale.length > 0) await tx.delete(schema.authSessions).where(inArray(schema.authSessions.id, stale.map((row) => row.id)))
+        return { interviewId: pairing.interviewId, session }
+      })
+    },
+    async cancelCompanionPairingsForUser(userId, at) {
+      await db.update(schema.companionPairings)
+        .set({ status: 'cancelled', cancelledAt: at, updatedAt: at })
+        .where(and(eq(schema.companionPairings.userId, userId), eq(schema.companionPairings.status, 'approved')))
+    },
     async createAuthToken(input) {
       await db.insert(schema.authTokens).values(input)
+    },
+    async hasValidAuthToken(tokenHash, type, now) {
+      const [row] = await db.select({ id: schema.authTokens.id }).from(schema.authTokens)
+        .where(and(eq(schema.authTokens.tokenHash, tokenHash), eq(schema.authTokens.type, type), isNull(schema.authTokens.usedAt), gt(schema.authTokens.expiresAt, now)))
+        .limit(1)
+      return Boolean(row)
     },
     async consumeAuthToken(tokenHash, type, now) {
       return db.transaction(async (tx) => {
@@ -89,8 +167,12 @@ export function createPostgresStore(databaseUrl: string, options: { max?: number
     },
     async updatePasswordAndRevokeSessions(userId, passwordHash) {
       await db.transaction(async (tx) => {
-        await tx.update(schema.users).set({ passwordHash, updatedAt: new Date() }).where(eq(schema.users.id, userId))
+        const now = new Date()
+        await tx.update(schema.users).set({ passwordHash, updatedAt: now }).where(eq(schema.users.id, userId))
         await tx.delete(schema.authSessions).where(eq(schema.authSessions.userId, userId))
+        await tx.update(schema.companionPairings)
+          .set({ status: 'cancelled', cancelledAt: now, updatedAt: now })
+          .where(and(eq(schema.companionPairings.userId, userId), eq(schema.companionPairings.status, 'approved')))
       })
     },
     async markEmailVerified(userId, at) {
@@ -214,6 +296,7 @@ export function createPostgresStore(databaseUrl: string, options: { max?: number
         'beta_invites',
         'candidate_profiles',
         'interview_sessions',
+        'companion_pairings',
         'interview_turns',
         'usage_events',
       ]

@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { RefObject } from 'react'
+import type { RefObject, WheelEvent as ReactWheelEvent } from 'react'
 import { MarkdownAnswer } from './MarkdownAnswer'
 import { isNearLiveAnswerEdge } from '../services/answerDisplayState'
 import type { AnswerDisplayAction, AnswerDisplayState, DisplayAnswer } from '../services/answerDisplayState'
+import { consumeVerticalWheel } from '../services/wheelScroll'
 
 interface AnswerDisplayProps {
   state: AnswerDisplayState
@@ -73,7 +74,7 @@ export function AnswerDisplay({
         </div>
       </div>
 
-      <div className="answer-stack">
+      <div className="answer-stack" onWheel={handleScrollableWheel}>
         {preview ? (
           <>
             <button className="back-to-current" type="button" onClick={() => dispatch({ type: 'preview', id: null })}>← Back to Current</button>
@@ -184,7 +185,7 @@ function AnswerCard({ answer, label, pinned, onPin, scrollRef, onScroll, showLat
     <article className={`answer-entry answer-${answer.status} ${label === 'PREVIOUS' ? 'is-previous' : ''}`}>
       <header><span>{label}</span><time>{formatTime(answer.createdAt)}</time><button type="button" onClick={() => onPin(pinned ? null : answer.id)}>{pinned ? 'Unpin' : 'Pin'}</button></header>
       {answer.question && <p className="answer-question">{answer.question}</p>}
-      <div className="answer-entry-content" ref={scrollRef} onScroll={onScroll} tabIndex={0}>
+      <div className="answer-entry-content" ref={scrollRef} onScroll={onScroll} onWheel={handleScrollableWheel} tabIndex={0}>
         {answer.answer ? <MarkdownAnswer content={answer.answer} /> : answer.status === 'failed' ? null : <p className="answer-placeholder">Waiting for the first token…</p>}
         {answer.status === 'failed' && <p className="answer-entry-error">Couldn't generate the next answer.</p>}
       </div>
@@ -203,7 +204,7 @@ const HistoryDrawer = memo(function HistoryDrawer({ open, entries, onClose, onPr
   return (
     <aside className="answer-history-drawer" aria-label="Interview History">
       <header><strong>Interview History</strong><button type="button" onClick={onClose} aria-label="Close history">×</button></header>
-      <div className="answer-history-list">
+      <div className="answer-history-list" onWheel={handleScrollableWheel} tabIndex={0}>
         {entries.length === 0 && <p>No completed answers yet.</p>}
         {entries.map((entry) => (
           <button type="button" key={entry.id} onClick={() => onPreview(entry.id)}>
@@ -216,6 +217,12 @@ const HistoryDrawer = memo(function HistoryDrawer({ open, entries, onClose, onPr
     </aside>
   )
 })
+
+function handleScrollableWheel(event: ReactWheelEvent<HTMLElement>) {
+  if (!consumeVerticalWheel(event.currentTarget, event)) return
+  event.preventDefault()
+  event.stopPropagation()
+}
 
 function mergeHistory(completed: DisplayAnswer[], history: RecentInteraction[]): DisplayAnswer[] {
   const entries = new Map<string, DisplayAnswer>()

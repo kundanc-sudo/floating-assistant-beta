@@ -26,7 +26,11 @@ const aiProvider = new OpenAiProvider(config.providerKey, {
   fast: config.fastModel,
   coding: config.codingModel,
   summary: config.summaryModel,
-}, config.aiTimeoutMs)
+}, config.aiTimeoutMs, {
+  onRealtimeDiagnostic: config.production
+    ? (diagnostic) => console.error(JSON.stringify({ event: 'openai_realtime_client_secret_failed', ...diagnostic }))
+    : undefined,
+})
 const emailService = config.emailProvider === 'resend'
   ? new ResendEmailService(config.emailProviderKey, config.emailFrom)
   : config.emailProvider === 'webhook'
@@ -38,6 +42,7 @@ const app = await buildApp({
   sessionTtlHours: config.sessionTtlHours,
   logger: config.production,
   development: !config.production,
+  production: config.production,
   trustProxy: config.trustProxy,
   allowedOrigins: config.allowedOrigins,
   emailService,
@@ -46,6 +51,7 @@ const app = await buildApp({
     passwordResetTtlMinutes: config.passwordResetTtlMinutes,
     emailVerificationTtlHours: config.emailVerificationTtlHours,
     publicBaseUrl: config.publicBaseUrl,
+    webAppBaseUrl: config.webAppBaseUrl,
     betaMode: config.betaMode,
   },
   aiPolicy: {
@@ -53,6 +59,12 @@ const app = await buildApp({
     dailyTokens: config.betaDailyTokens,
     concurrentRequests: config.betaConcurrentAiRequests,
     timeoutMs: config.aiTimeoutMs,
+  },
+  documents: {
+    maxFileBytes: config.documentMaxFileBytes,
+    maxExtractedChars: config.documentMaxExtractedChars,
+    maxPdfPages: config.documentMaxPdfPages,
+    processingTimeoutMs: config.documentProcessingTimeoutMs,
   },
 })
 

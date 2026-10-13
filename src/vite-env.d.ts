@@ -132,6 +132,7 @@ interface ProductBootstrap {
   profiles: ProfileSummary[]
   settings: { defaultAutoAssist: boolean }
   activeInterviewId?: string
+  sessionState?: 'ready' | 'offline'
 }
 
 interface ProductResult {
@@ -143,6 +144,17 @@ interface ProductResult {
   file?: { name: string; size: number; kind: string }
   canceled?: boolean
   error?: string
+}
+
+interface DesktopPairingState {
+  status: 'idle' | 'pending' | 'approved' | 'expired' | 'failed' | 'cancelled' | 'connected'
+  pairingCode?: string
+  expiresAt?: string
+  error?: string
+  connection?: {
+    interview: { id: string; name: string; company?: string; role?: string }
+    bootstrap: ProductBootstrap
+  }
 }
 
 interface PendingScreenshot {
@@ -203,6 +215,7 @@ interface SelectionRectangle {
 interface Window {
   productAPI: {
     getBootstrap: () => Promise<ProductBootstrap>
+    retrySession: () => Promise<ProductBootstrap>
     login: (email: string, password: string, displayName?: string, inviteCode?: string) => Promise<ProductResult>
     logout: () => Promise<ProductBootstrap>
     beginNewInterview: () => Promise<InterviewContextStatus>
@@ -225,6 +238,11 @@ interface Window {
     updateSettings: (defaultAutoAssist: boolean) => Promise<ProductResult>
     updateAccount: (displayName: string) => Promise<ProductResult>
     clearLocalData: () => Promise<ProductBootstrap>
+    startDesktopPairing: () => Promise<DesktopPairingState>
+    getDesktopPairing: () => Promise<DesktopPairingState>
+    cancelDesktopPairing: () => Promise<DesktopPairingState>
+    onDesktopPairingState: (listener: (state: DesktopPairingState) => void) => () => void
+    onSessionInvalidated: (listener: (bootstrap: ProductBootstrap) => void) => () => void
     onSurfaceMode: (listener: (mode: 'product' | 'assistant') => void) => () => void
   }
   overlayAPI: {

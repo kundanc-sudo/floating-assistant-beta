@@ -138,8 +138,23 @@ button:disabled { opacity: .42; }
 .login-card label { display: flex; flex-direction: column; gap: 5px; margin-top: 11px; color: #94a3b8; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .login-card input { padding: 9px 10px; border: 1px solid rgba(148, 163, 184, .16); border-radius: 7px; color: #e2e8f0; background: rgba(2, 6, 23, .55); font: inherit; }
 .login-card .primary-action { width: 100%; margin-top: 16px; }
+.pairing-entry-action { width: 100%; margin-top: 10px; padding: 9px 12px; border: 1px solid rgba(110, 231, 183, .3); border-radius: 7px; color: #a7f3d0; background: rgba(16, 185, 129, .08); font: inherit; font-size: 10px; font-weight: 750; }
+.pairing-entry-action:hover:not(:disabled) { background: rgba(16, 185, 129, .15); }
 .link-action { display: block; margin: 12px auto 0; border: 0; color: #7dd3fc; background: transparent; font: inherit; font-size: 9px; }
 .login-card small { display: block; margin-top: 18px; color: #475569; font-size: 8px; line-height: 1.4; text-align: center; }
+.pairing-card { width: min(390px, calc(100vw - 40px)); }
+.pairing-code-block { display: grid; justify-items: center; gap: 8px; margin: 20px 0 8px; padding: 20px; border: 1px solid rgba(56, 189, 248, .25); border-radius: 11px; background: rgba(2, 6, 23, .55); }
+.pairing-code-block span { color: #94a3b8; font-size: 9px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.pairing-code-block strong { color: #e0f2fe; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 27px; letter-spacing: .12em; }
+.pairing-code-block small { margin: 0; color: #7dd3fc; font-size: 9px; }
+.pairing-state { margin-top: 18px; padding: 11px 12px; border: 1px solid rgba(148, 163, 184, .15); border-radius: 8px; color: #cbd5e1; background: rgba(15, 23, 42, .55); font-size: 10px; line-height: 1.5; text-align: center; }
+.pairing-state.warning { color: #fde68a; border-color: rgba(250, 204, 21, .22); background: rgba(161, 98, 7, .1); }
+.pairing-state.error { color: #fecdd3; border-color: rgba(244, 63, 94, .25); background: rgba(159, 18, 57, .12); }
+.pairing-state.connected { color: #a7f3d0; border-color: rgba(16, 185, 129, .3); background: rgba(16, 185, 129, .1); }
+.pairing-state.connected strong { color: #d1fae5; }
+.pairing-actions { display: grid; gap: 8px; margin-top: 16px; }
+.pairing-actions .primary-action, .pairing-actions .secondary-action { width: 100%; margin: 0; }
+.pairing-actions .link-action { margin-top: 2px; }
 
 @media (max-width: 850px) {
   .product-layout { grid-template-columns: 170px minmax(0, 1fr); }

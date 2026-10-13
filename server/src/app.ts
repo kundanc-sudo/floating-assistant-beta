@@ -2,9 +2,12 @@ import { Readable } from 'node:stream'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { LogController, type FastifyReply, type FastifyRequest } from 'fastify'
 import { AuthService, bearerToken, publicUser } from './auth/authService.js'
+import { clearBrowserSessionCookie, createBrowserSessionCookie, createCsrfToken, csrfTokenMatches, readBrowserSession } from './auth/browserSession.js'
 import type { AiProvider, AiRequest, ProviderUsage } from './ai/provider.js'
+import { CompanionPairingService } from './companion/pairingService.js'
 import type { AuthSessionRecord, ProductStore, UserRecord } from './db/store.js'
 import { ConsoleEmailService, type EmailService } from './email/emailService.js'
+import { DEFAULT_DOCUMENT_LIMITS, extractDocument, type DocumentLimits } from './documents/documentExtractionService.js'
 
 interface Dependencies {
   store: ProductStore
@@ -12,6 +15,7 @@ interface Dependencies {
   sessionTtlHours?: number
   logger?: boolean
   development?: boolean
+  production?: boolean
   trustProxy?: boolean
   allowedOrigins?: string[]
   emailService?: EmailService
@@ -20,6 +24,7 @@ interface Dependencies {
     passwordResetTtlMinutes: number
     emailVerificationTtlHours: number
     publicBaseUrl: string
+    webAppBaseUrl?: string
     betaMode: boolean
   }
   aiPolicy?: {
@@ -28,37 +33,53 @@ interface Dependencies {
     concurrentRequests: number
     timeoutMs: number
   }
+  documents?: DocumentLimits
 }
 
-type AuthedRequest = FastifyRequest & { authenticatedUser?: UserRecord; authenticatedSession?: AuthSessionRecord; sessionToken?: string }
+type AuthenticationSource = 'bearer' | 'cookie'
+type AuthedRequest = FastifyRequest & { authenticatedUser?: UserRecord; authenticatedSession?: AuthSessionRecord; sessionToken?: string; authenticationSource?: AuthenticationSource }
 const uuid = { type: 'string', format: 'uuid' } as const
 const text = (maxLength: number, minLength = 0) => ({ type: 'string', minLength, maxLength })
 const optionalText = (maxLength: number) => ({ anyOf: [{ type: 'string', maxLength }, { type: 'null' }] })
 const noExtra = { additionalProperties: false } as const
 
 export async function buildApp(deps: Dependencies) {
-  const app = Fastify({ logger: deps.logger ?? false, logController: new LogController({ disableRequestLogging: true }), bodyLimit: 6 * 1024 * 1024, trustProxy: deps.trustProxy ?? false })
+  const documentLimits = { ...DEFAULT_DOCUMENT_LIMITS, ...deps.documents }
+  const app = Fastify({ logger: deps.logger ?? false, logController: new LogController({ disableRequestLogging: true }), bodyLimit: Math.max(6 * 1024 * 1024, documentLimits.maxFileBytes), trustProxy: deps.trustProxy ?? false })
   await app.register(rateLimit, { global: false })
+  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: documentLimits.maxFileBytes }, (_request, body, done) => done(null, body))
   const auth = new AuthService(deps.store, deps.emailService ?? new ConsoleEmailService(false), {
     sessionTtlHours: deps.sessionTtlHours ?? 720,
     maxSessionsPerUser: deps.auth?.maxSessionsPerUser ?? 10,
     passwordResetTtlMinutes: deps.auth?.passwordResetTtlMinutes ?? 30,
     emailVerificationTtlHours: deps.auth?.emailVerificationTtlHours ?? 24,
     publicBaseUrl: deps.auth?.publicBaseUrl ?? 'http://localhost:3001',
+    webAppBaseUrl: deps.auth?.webAppBaseUrl ?? deps.auth?.publicBaseUrl ?? 'http://localhost:3001',
     betaMode: deps.auth?.betaMode ?? false,
     development: deps.development ?? false,
   })
   const allowedOrigins = new Set(deps.allowedOrigins ?? [])
+  const publicOrigin = new URL(deps.auth?.publicBaseUrl ?? 'http://localhost:3001').origin
+  const webAppOrigin = new URL(deps.auth?.webAppBaseUrl ?? deps.auth?.publicBaseUrl ?? 'http://localhost:3001').origin
+  const trustedBrowserOrigins = new Set([...allowedOrigins, publicOrigin, webAppOrigin])
+  const production = deps.production ?? false
+  const sessionTtlHours = deps.sessionTtlHours ?? 720
+  const cookieOptions = { production, maxAgeSeconds: sessionTtlHours * 60 * 60 }
   const aiPolicy = deps.aiPolicy ?? { dailyRequests: 100, dailyTokens: 250_000, concurrentRequests: 2, timeoutMs: 120_000 }
   const aiConcurrency = new UserConcurrencyLimiter(aiPolicy.concurrentRequests)
+  const companionPairing = new CompanionPairingService(deps.store, {
+    sessionTtlHours,
+    maxSessionsPerUser: deps.auth?.maxSessionsPerUser ?? 10,
+  })
 
   app.addHook('onRequest', async (request, reply) => {
     const origin = request.headers.origin
     if (!origin || !request.url.startsWith('/api/')) return
-    if (!allowedOrigins.has(origin)) return reply.code(403).send({ error: 'Origin not allowed.', code: 'ORIGIN_NOT_ALLOWED' })
+    if (!trustedBrowserOrigins.has(origin)) return reply.code(403).send({ error: 'Origin not allowed.', code: 'ORIGIN_NOT_ALLOWED' })
     reply.header('Access-Control-Allow-Origin', origin).header('Vary', 'Origin')
+      .header('Access-Control-Allow-Credentials', 'true')
     if (request.method === 'OPTIONS') {
-      reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+      reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-CSRF-Token, X-Document-Name')
         .header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
       return reply.code(204).send()
     }
@@ -80,8 +101,9 @@ export async function buildApp(deps: Dependencies) {
   app.setErrorHandler((error, _request, reply) => {
     const status = Number((error as { statusCode?: number }).statusCode) || 500
     const safeStatus = status >= 400 && status < 500 ? status : 500
-    const message = error instanceof Error ? error.message : 'Invalid request.'
-    const errorCode = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : undefined
+    const validationError = Array.isArray((error as { validation?: unknown }).validation)
+    const message = validationError ? 'Please check the submitted information.' : error instanceof Error ? error.message : 'Invalid request.'
+    const errorCode = !validationError && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : undefined
     if (safeStatus >= 500 && deps.logger) {
       _request.log.error({
         event: 'request_failed',
@@ -107,16 +129,93 @@ export async function buildApp(deps: Dependencies) {
   })
 
   const authenticate = async (request: FastifyRequest, reply: FastifyReply) => {
-    const token = bearerToken(request.headers.authorization)
+    const bearer = bearerToken(request.headers.authorization)
+    const cookie = bearer ? '' : readBrowserSession(request.headers.cookie, production)
+    const token = bearer || cookie
+    const source: AuthenticationSource | undefined = bearer ? 'bearer' : cookie ? 'cookie' : undefined
+    if (source === 'cookie' && isStateChanging(request.method)) {
+      if (!isTrustedBrowserOrigin(request.headers.origin, trustedBrowserOrigins)) {
+        return reply.code(403).send({ error: 'A trusted website origin is required.', code: 'ORIGIN_REQUIRED' })
+      }
+      const csrf = request.headers['x-csrf-token']
+      if (typeof csrf !== 'string' || !csrfTokenMatches(token, csrf)) {
+        return reply.code(403).send({ error: 'The security token is missing or invalid. Refresh the page and try again.', code: 'CSRF_TOKEN_INVALID' })
+      }
+    }
     const authenticated = await auth.authenticate(token)
     if (!authenticated) return reply.code(401).send({ error: 'Authentication required.', code: 'AUTHENTICATION_REQUIRED' })
     ;(request as AuthedRequest).authenticatedUser = authenticated.user
     ;(request as AuthedRequest).authenticatedSession = authenticated.session
     ;(request as AuthedRequest).sessionToken = token
+    ;(request as AuthedRequest).authenticationSource = source
+  }
+  const requireBrowserOrigin = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isTrustedBrowserOrigin(request.headers.origin, trustedBrowserOrigins)) {
+      return reply.code(403).send({ error: 'A trusted website origin is required.', code: 'ORIGIN_REQUIRED' })
+    }
+  }
+  const requireBrowserAuthentication = async (request: FastifyRequest, reply: FastifyReply) => {
+    if ((request as AuthedRequest).authenticationSource !== 'cookie') {
+      return reply.code(403).send({ error: 'A signed-in website session is required.', code: 'BROWSER_SESSION_REQUIRED' })
+    }
   }
   const userOf = (request: FastifyRequest) => (request as AuthedRequest).authenticatedUser!
 
   app.get('/health', async () => ({ ok: true }))
+  app.post('/api/v1/companion/pairings', {
+    config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+  }, async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return reply.code(201).send(await companionPairing.create())
+  })
+  app.post('/api/v1/companion/pairings/approve', {
+    preHandler: [authenticate, requireBrowserAuthentication],
+    config: { rateLimit: { max: 8, timeWindow: '5 minutes' } },
+    schema: {
+      body: {
+        type: 'object',
+        ...noExtra,
+        required: ['pairingCode', 'interviewId'],
+        properties: {
+          pairingCode: { type: 'string', minLength: 8, maxLength: 16, pattern: '^[A-Za-z2-9\\s-]+$' },
+          interviewId: uuid,
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const body = request.body as { pairingCode: string; interviewId: string }
+    reply.header('Cache-Control', 'no-store')
+    return { pairing: await companionPairing.approve(userOf(request).id, body.interviewId, body.pairingCode) }
+  })
+  app.post('/api/v1/companion/pairings/:id/status', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    schema: { params: idParams(), body: pairingSecretBody(false) },
+  }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return { pairing: await companionPairing.status((request.params as { id: string }).id, (request.body as { redemptionSecret: string }).redemptionSecret) }
+  })
+  app.post('/api/v1/companion/pairings/:id/redeem', {
+    config: { rateLimit: { max: 10, timeWindow: '5 minutes' } },
+    schema: { params: idParams(), body: pairingSecretBody(true) },
+  }, async (request, reply) => {
+    const body = request.body as { redemptionSecret: string; deviceLabel?: string }
+    reply.header('Cache-Control', 'no-store')
+    return companionPairing.redeem((request.params as { id: string }).id, body.redemptionSecret, body.deviceLabel ?? 'Windows companion')
+  })
+  app.post('/api/v1/documents/extract', {
+    preHandler: authenticate,
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    schema: { headers: { type: 'object', required: ['x-document-name'], properties: { 'x-document-name': text(1_024, 1) } } },
+  }, async (request, reply) => {
+    if (!Buffer.isBuffer(request.body)) return reply.code(415).send({ error: 'Upload the document as application/octet-stream.', code: 'DOCUMENT_CONTENT_TYPE_REQUIRED' })
+    const filename = request.headers['x-document-name']
+    const contents = request.body
+    try {
+      return { document: await extractDocument(contents, decodeDocumentName(typeof filename === 'string' ? filename : ''), documentLimits) }
+    } finally {
+      contents.fill(0)
+    }
+  })
   app.get('/health/live', async () => ({ status: 'live' }))
   app.get('/health/ready', async (_request, reply) => {
     try {
@@ -129,26 +228,55 @@ export async function buildApp(deps: Dependencies) {
 
   app.post('/api/v1/auth/register', {
     config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
-    schema: { body: { type: 'object', ...noExtra, required: ['email', 'password', 'displayName'], properties: { email: { type: 'string', format: 'email', maxLength: 254 }, password: text(128, 8), displayName: text(100, 1), inviteCode: text(256) } } },
+    schema: { body: registerBody() },
   }, async (request, reply) => {
     const body = request.body as { email: string; password: string; displayName: string; inviteCode?: string }
     return reply.code(201).send(await auth.register(body.email, body.password, body.displayName, body.inviteCode, deviceLabel(request)))
   })
   app.post('/api/v1/auth/login', {
     config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
-    schema: { body: { type: 'object', ...noExtra, required: ['email', 'password'], properties: { email: { type: 'string', format: 'email', maxLength: 254 }, password: text(128, 1) } } },
+    schema: { body: loginBody() },
   }, async (request) => {
     const body = request.body as { email: string; password: string }
     return auth.login(body.email, body.password, deviceLabel(request))
   })
+  app.post('/api/v1/auth/browser/register', {
+    preHandler: requireBrowserOrigin,
+    config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+    schema: { body: registerBody() },
+  }, async (request, reply) => {
+    const body = request.body as { email: string; password: string; displayName: string; inviteCode?: string }
+    const session = await auth.register(body.email, body.password, body.displayName, body.inviteCode, deviceLabel(request))
+    reply.header('Set-Cookie', createBrowserSessionCookie(session.token, cookieOptions)).header('Cache-Control', 'no-store')
+    return reply.code(201).send({ user: session.user, csrfToken: createCsrfToken(session.token) })
+  })
+  app.post('/api/v1/auth/browser/login', {
+    preHandler: requireBrowserOrigin,
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    schema: { body: loginBody() },
+  }, async (request, reply) => {
+    const body = request.body as { email: string; password: string }
+    const session = await auth.login(body.email, body.password, deviceLabel(request))
+    reply.header('Set-Cookie', createBrowserSessionCookie(session.token, cookieOptions)).header('Cache-Control', 'no-store')
+    return { user: session.user, csrfToken: createCsrfToken(session.token) }
+  })
   app.post('/api/v1/auth/logout', { preHandler: authenticate }, async (request, reply) => {
     await auth.logout((request as AuthedRequest).sessionToken ?? '')
+    if ((request as AuthedRequest).authenticationSource === 'cookie') reply.header('Set-Cookie', clearBrowserSessionCookie(production))
     return reply.code(204).send()
   })
-  app.get('/api/v1/auth/me', { preHandler: authenticate }, async (request) => ({ user: publicUser(userOf(request)) }))
+  app.get('/api/v1/auth/me', { preHandler: authenticate }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return {
+      user: publicUser(userOf(request)),
+      ...((request as AuthedRequest).authenticationSource === 'cookie'
+        ? { csrfToken: createCsrfToken((request as AuthedRequest).sessionToken!) }
+        : {}),
+    }
+  })
   app.put('/api/v1/auth/me', {
     preHandler: authenticate,
-    schema: { body: { type: 'object', ...noExtra, required: ['displayName'], properties: { displayName: text(100, 1) } } },
+    schema: { body: { type: 'object', ...noExtra, required: ['displayName'], properties: { displayName: { ...text(100, 1), pattern: '\\S' } } } },
   }, async (request, reply) => {
     const user = await deps.store.updateUser(userOf(request).id, (request.body as { displayName: string }).displayName.trim())
     return user ? { user: publicUser(user) } : reply.code(404).send({ error: 'User not found.' })
@@ -159,6 +287,7 @@ export async function buildApp(deps: Dependencies) {
   }, async (request, reply) => {
     const body = request.body as { password: string; confirmation: string }
     await auth.deleteAccount(userOf(request), body.password, body.confirmation)
+    if ((request as AuthedRequest).authenticationSource === 'cookie') reply.header('Set-Cookie', clearBrowserSessionCookie(production))
     return reply.code(204).send()
   })
   app.get('/api/v1/auth/sessions', { preHandler: authenticate }, async (request) => ({
@@ -204,6 +333,38 @@ export async function buildApp(deps: Dependencies) {
     await auth.resendVerification(userOf(request))
     return reply.code(204).send()
   })
+
+  // Browser recovery endpoints require a trusted Origin while preserving the
+  // existing bearer-compatible endpoints above for the desktop client.
+  app.post('/api/v1/auth/browser/forgot-password', {
+    preHandler: requireBrowserOrigin,
+    config: { rateLimit: { max: 5, timeWindow: '15 minutes' } },
+    schema: { body: { type: 'object', ...noExtra, required: ['email'], properties: { email: { type: 'string', format: 'email', maxLength: 254 } } } },
+  }, async (request) => auth.requestPasswordReset((request.body as { email: string }).email))
+  app.post('/api/v1/auth/browser/reset-password/validate', {
+    preHandler: requireBrowserOrigin,
+    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
+    schema: { body: { type: 'object', ...noExtra, required: ['token'], properties: { token: text(256, 32) } } },
+  }, async (request) => {
+    const valid = await auth.validatePasswordResetToken((request.body as { token: string }).token)
+    if (!valid) throw Object.assign(new Error('The password reset link is invalid or has expired.'), { statusCode: 400, code: 'INVALID_OR_EXPIRED_TOKEN' })
+    return { valid: true }
+  })
+  app.post('/api/v1/auth/browser/reset-password', {
+    preHandler: requireBrowserOrigin,
+    config: { rateLimit: { max: 5, timeWindow: '15 minutes' } },
+    schema: { body: { type: 'object', ...noExtra, required: ['token', 'password'], properties: { token: text(256, 32), password: text(128, 8) } } },
+  }, async (request, reply) => {
+    const body = request.body as { token: string; password: string }
+    await auth.resetPassword(body.token, body.password)
+    reply.header('Set-Cookie', clearBrowserSessionCookie(production))
+    return reply.code(204).send()
+  })
+  app.post('/api/v1/auth/browser/verify-email', {
+    preHandler: requireBrowserOrigin,
+    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
+    schema: { body: { type: 'object', ...noExtra, required: ['token'], properties: { token: text(256, 32) } } },
+  }, async (request) => ({ user: publicUser((await auth.verifyEmail((request.body as { token: string }).token))!) }))
 
   app.get('/api/v1/profiles', { preHandler: authenticate }, async (request) => ({ profiles: await deps.store.listProfiles(userOf(request).id) }))
   app.post('/api/v1/profiles', {
@@ -413,6 +574,27 @@ function idParams() {
   return { type: 'object', ...noExtra, required: ['id'], properties: { id: uuid } }
 }
 
+function registerBody() {
+  return { type: 'object', ...noExtra, required: ['email', 'password', 'displayName'], properties: { email: { type: 'string', format: 'email', maxLength: 254 }, password: text(128, 8), displayName: text(100, 1), inviteCode: text(256) } }
+}
+
+function loginBody() {
+  return { type: 'object', ...noExtra, required: ['email', 'password'], properties: { email: { type: 'string', format: 'email', maxLength: 254 }, password: text(128, 1) } }
+}
+
+function isStateChanging(method: string) {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())
+}
+
+function isTrustedBrowserOrigin(origin: string | undefined, trustedOrigins: Set<string>) {
+  if (!origin) return false
+  try { return trustedOrigins.has(new URL(origin).origin) } catch { return false }
+}
+
+function decodeDocumentName(value: string) {
+  try { return decodeURIComponent(value) } catch { return value }
+}
+
 function profileBody(required: boolean) {
   return { type: 'object', ...noExtra, minProperties: 1, required: required ? ['name', 'resumeText', 'defaultInstructions'] : undefined, properties: { name: text(120, 1), resumeText: text(500000, 1), defaultInstructions: text(50000, 1) } }
 }
@@ -423,4 +605,16 @@ function interviewBody(required: boolean) {
 
 function aiBody() {
   return { type: 'object', ...noExtra, required: ['sessionId', 'route', 'userText', 'instructions'], properties: { sessionId: uuid, route: { type: 'string', enum: ['CONVERSATION', 'TECHNICAL', 'CODING'] }, userText: text(128000, 1), instructions: text(100000, 1), imageInputs: { type: 'array', maxItems: 8, items: { type: 'object', ...noExtra, required: ['label', 'imageDataUrl'], properties: { label: text(500, 1), imageDataUrl: text(5000000, 1) } } } } }
+}
+
+function pairingSecretBody(includeDeviceLabel: boolean) {
+  return {
+    type: 'object',
+    ...noExtra,
+    required: ['redemptionSecret'],
+    properties: {
+      redemptionSecret: text(256, 32),
+      ...(includeDeviceLabel ? { deviceLabel: text(100) } : {}),
+    },
+  }
 }
