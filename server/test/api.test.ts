@@ -132,7 +132,7 @@ test('browser registration, restoration, CSRF protection, and logout use a secur
   assert.match(setCookie, /; Path=\//)
   assert.match(setCookie, /; HttpOnly/)
   assert.match(setCookie, /; Secure/)
-  assert.match(setCookie, /; SameSite=Lax/)
+  assert.match(setCookie, /; SameSite=None/)
   const cookie = setCookie.split(';', 1)[0]
 
   const restored = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { cookie } })
