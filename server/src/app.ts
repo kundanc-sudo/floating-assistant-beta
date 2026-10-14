@@ -312,20 +312,6 @@ export async function buildApp(deps: Dependencies) {
     config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
     schema: { body: { type: 'object', ...noExtra, required: ['token'], properties: { token: text(256, 32) } } },
   }, async (request) => ({ user: publicUser((await auth.verifyEmail((request.body as { token: string }).token))!) }))
-  app.get('/verify-email', {
-    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
-    schema: { querystring: { type: 'object', ...noExtra, required: ['token'], properties: { token: text(256, 32) } } },
-  }, async (request, reply) => {
-    await auth.verifyEmail((request.query as { token: string }).token)
-    return reply.type('text/html; charset=utf-8').send('<!doctype html><meta charset="utf-8"><title>Email verified</title><p>Your email is verified. You can return to Floating Assistant.</p>')
-  })
-  app.get('/reset-password', {
-    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
-    schema: { querystring: { type: 'object', ...noExtra, required: ['token'], properties: { token: text(256, 32) } } },
-  }, async (request, reply) => {
-    const token = escapeHtml((request.query as { token: string }).token)
-    return reply.type('text/html; charset=utf-8').send(`<!doctype html><meta charset="utf-8"><title>Reset password</title><h1>Reset your password</h1><p>In Floating Assistant, choose <strong>Forgot password?</strong> and paste this one-time token:</p><p><code>${token}</code></p><p>This token expires and can be used only once.</p>`)
-  })
   app.post('/api/v1/auth/resend-verification', {
     preHandler: authenticate,
     config: { rateLimit: { max: 3, timeWindow: '15 minutes' } },

@@ -11,6 +11,7 @@ import { createGracefulShutdown } from './gracefulShutdown.js'
 import { RateLimiter } from './share/rateLimiter.js'
 import { ShareSessionManager, type PublishedEvent } from './share/shareSessionManager.js'
 import { viewerPage } from './viewerPage.js'
+import fastifyStatic from '@fastify/static'
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url))
 loadDotEnv({ path: path.resolve(currentDirectory, '../.env'), quiet: true })
@@ -75,8 +76,43 @@ const shares = new ShareSessionManager(ttlMinutes * 60_000)
 const joinLimiter = new RateLimiter(12, 60_000)
 const createLimiter = new RateLimiter(20, 60_000)
 
-app.get('/', async (_request, reply) => reply.type('text/html; charset=utf-8').send(viewerPage))
-app.get('/view', async (_request, reply) => reply.type('text/html; charset=utf-8').send(viewerPage))
+const webDistDirectory = path.resolve(currentDirectory, '../web-dist')
+
+await app.register(fastifyStatic, {
+  root: webDistDirectory,
+  prefix: '/',
+  wildcard: false,
+  index: false,
+})
+app.get('/view', async (_request, reply) =>
+  reply.type('text/html; charset=utf-8').send(viewerPage)
+)
+
+app.get('/', async (_request, reply) =>
+  reply.type('text/html; charset=utf-8')
+    .sendFile('index.html', webDistDirectory)
+)
+
+const reactRoutes = [
+  '/login',
+  '/register',
+  '/forgot-password',
+  '/dashboard',
+  '/settings',
+  '/profiles',
+  '/prepare',
+  '/interviews',
+  '/interviews/:id',
+  '/reset-password',
+'/verify-email',
+]
+
+for (const route of reactRoutes) {
+  app.get(route, async (_request, reply) =>
+    reply.type('text/html; charset=utf-8')
+      .sendFile('index.html', webDistDirectory)
+  )
+}
 app.post('/api/share/session', async (request, reply) => {
   if (!originAllowed(request.headers.origin)) return reply.code(403).send({ error: 'Origin not allowed.' })
   if (!createLimiter.allow(request.ip)) return reply.code(429).send({ error: 'Too many requests.' })
